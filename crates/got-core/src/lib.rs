@@ -2,20 +2,15 @@
 
 pub mod config;
 pub mod git;
+pub mod image;
 pub mod shim;
 
 use anyhow::{bail, Context, Result};
 use got_store::{
-    cow_clone, images_dir, machines_dir, save_snapshot, timestamp, Machine, Registry, Snapshot,
+    cow_clone, machines_dir, save_snapshot, timestamp, Machine, Registry, Snapshot,
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-/// The default base image for machines. The MVP ships prebuilt images;
-/// until the fetch pipeline lands, `got doctor` explains how to build one.
-pub fn default_base_image() -> PathBuf {
-    images_dir().join("default.img")
-}
 
 fn overlay_path(handle: &str) -> PathBuf {
     machines_dir().join(format!("{}.img", shim::sanitize(handle)))
@@ -156,7 +151,10 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
         });
     }
 
-    // New handle: resolve the source into a disk to clone.
+    // New handle: resolve the source into a disk to clone. The golden image
+    // is built on first use for this project's recipe (plan.md §5).
+    let (cfg, root) = config::load()?;
+    let base_image = image::ensure(&cfg, &root)?;
     let mut restored_from = None;
     let (source_disk, base_commit, parent): (PathBuf, Option<String>, Option<String>) =
         match from {
@@ -191,7 +189,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
                             restored_from = Some(snap);
                             (path, Some(sha), None)
                         }
-                        None => (default_base_image(), Some(sha), None),
+                        None => (base_image.clone(), Some(sha), None),
                     }
                 } else {
                     bail!("'{}' is not a snapshot, machine, or git commit", src);
@@ -208,19 +206,12 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
                             restored_from = Some(snap);
                             (path, head.clone(), None)
                         }
-                        None => (default_base_image(), head.clone(), None),
+                        None => (base_image.clone(), head.clone(), None),
                     },
-                    None => (default_base_image(), None, None),
+                    None => (base_image.clone(), None, None),
                 }
             }
         };
-
-    if !source_disk.exists() {
-        bail!(
-            "no base image at {} — run `got doctor` for setup instructions",
-            source_disk.display()
-        );
-    }
 
     let overlay = overlay_path(name);
     if overlay.exists() {
@@ -228,7 +219,6 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
     }
     cow_clone(&source_disk, &overlay)?;
 
-    let (cfg, root) = config::load()?;
     let port_map = allocate_ports(name, &cfg.network.ports);
 
     reg.insert_machine(&Machine {
@@ -236,7 +226,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
         base_commit,
         recipe_hash: cfg.recipe_hash(&root),
         parent_machine: parent,
-        base_image_path: default_base_image().to_string_lossy().into_owned(),
+        base_image_path: base_image.to_string_lossy().into_owned(),
         overlay_path: overlay.to_string_lossy().into_owned(),
         lifecycle: "live".into(),
         detached,

@@ -115,9 +115,14 @@ fn cmd_run(args: &[String]) -> Result<i32> {
     if cmd_parts.is_empty() {
         bail!("no command given after --");
     }
-    // Single-word commands run as-is via sh -c; multi-word are joined with
-    // shell quoting preserved by the caller's shell already.
-    let cmd = cmd_parts.join(" ");
+    // Each argv token is shell-quoted so the guest's `sh -c` sees exactly
+    // what the caller's shell passed. A single token is left untouched so
+    // `got run m -- 'echo a && echo b'` still composes as a shell command.
+    let cmd = if cmd_parts.len() == 1 {
+        cmd_parts[0].clone()
+    } else {
+        cmd_parts.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
+    };
     let (code, out) = got_core::run_in_machine(name, &cmd)?;
     std::io::stdout().write_all(&out)?;
     Ok(code as i32)
@@ -140,6 +145,19 @@ fn cmd_save(args: &[String]) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+/// Quote one token for POSIX sh unless it is already safe.
+fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '@' | '+' | '%')
+        });
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
 }
 
 fn print_save(name: &str, o: &got_core::SaveOutcome) {
@@ -256,9 +274,9 @@ fn cmd_doctor() -> Result<i32> {
     );
 
     check(
-        "base image present",
-        got_core::default_base_image().exists(),
-        "build one with: scripts/build-base-image.sh (see README)",
+        "filesystem tools installed",
+        got_core::image::tools_installed(),
+        "install with: brew install e2fsprogs",
     );
 
     let entitled = {

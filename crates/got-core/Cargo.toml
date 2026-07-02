@@ -10,6 +10,10 @@ anyhow.workspace = true
 libc.workspace = true
 blake3.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
+ureq.workspace = true
+tar.workspace = true
+flate2.workspace = true
 got-vmm = { path = "../got-vmm" }
 got-store = { path = "../got-store" }
