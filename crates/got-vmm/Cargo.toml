@@ -1,0 +1,10 @@
+[package]
+name = "got-vmm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true

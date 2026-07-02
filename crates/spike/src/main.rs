@@ -491,6 +491,87 @@ fn cmd_serial_bench(base: &str, n: usize) {
     let _ = std::fs::remove_file(&disk);
 }
 
+// ---- parallel machines smoke test ----
+
+fn cmd_parallel(base: &str, n: usize) {
+    let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
+    println!("== parallel: {} machines, boot + exec + verify + shutdown ==", n);
+    let t_all = Instant::now();
+
+    struct Member {
+        pid: i32,
+        wr: std::fs::File,
+        rd: std::fs::File,
+        disk: String,
+    }
+    let mut members = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let disk = format!("{}/par-{}.img", dir, i);
+        cow_clone(base, &disk);
+        let mut h2g = [0i32; 2];
+        let mut g2h = [0i32; 2];
+        unsafe {
+            assert_eq!(libc::pipe(h2g.as_mut_ptr()), 0);
+            assert_eq!(libc::pipe(g2h.as_mut_ptr()), 0);
+        }
+        let pid = spawn_machine(
+            &disk,
+            &agent_argv("--serial"),
+            Some(AgentTransport::Serial { input_fd: h2g[0], output_fd: g2h[1] }),
+            Some(&format!("/tmp/got-spike-par-{}.log", i)),
+        );
+        unsafe {
+            libc::close(h2g[0]);
+            libc::close(g2h[1]);
+        }
+        use std::os::unix::io::FromRawFd;
+        members.push(Member {
+            pid,
+            wr: unsafe { std::fs::File::from_raw_fd(h2g[1]) },
+            rd: unsafe { std::fs::File::from_raw_fd(g2h[0]) },
+            disk,
+        });
+    }
+    println!("[spawn] {} machines forked in {:.1} ms", n, t_all.elapsed().as_secs_f64() * 1000.0);
+
+    // Each machine: write a unique marker, read it back. Requests are sent to
+    // all machines before any response is awaited, so the guests run
+    // concurrently.
+    for (i, m) in members.iter_mut().enumerate() {
+        let cmd = format!("echo machine-{} > /whoami && cat /whoami", i);
+        send_request(&mut m.wr, cmd.as_bytes()).expect("send");
+    }
+    for (i, m) in members.iter_mut().enumerate() {
+        let (code, out) = read_response(&mut m.rd).expect("exec");
+        assert_eq!(code, 0, "machine {} exec failed", i);
+        let expected = format!("machine-{}\n", i);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            expected,
+            "machine {} returned wrong identity",
+            i
+        );
+    }
+    let ready_ms = t_all.elapsed().as_secs_f64() * 1000.0;
+    println!("[exec] all {} machines answered with distinct state ({:.1} ms total)", n, ready_ms);
+
+    for m in members.iter_mut() {
+        send_request(&mut m.wr, b"__poweroff__").expect("poweroff send");
+        let _ = read_response(&mut m.rd);
+    }
+    for m in &members {
+        wait_machine(m.pid);
+        let _ = std::fs::remove_file(&m.disk);
+    }
+    println!("[drop] all machines shut down cleanly");
+    println!("---");
+    println!(
+        "PARALLEL: PASS ({} machines, {:.1} ms spawn-to-verified)",
+        n, ready_ms
+    );
+}
+
 // ---- end-to-end (M0 exit gate) ----
 
 /// Registry: one line per snapshot, "handle head_sha content_hash".
@@ -706,6 +787,11 @@ fn main() {
             let handle = args.get(3).map(String::as_str).unwrap_or("spike-machine");
             cmd_e2e(base, handle);
         }
+        Some("parallel") => {
+            let base = args.get(2).unwrap_or_else(|| usage());
+            let n: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(6);
+            cmd_parallel(base, n);
+        }
         _ => {
             usage();
         }
@@ -718,5 +804,6 @@ fn usage() -> ! {
     eprintln!("       spike vsock-bench <base.img> [n]");
     eprintln!("       spike serial-bench <base.img> [n]");
     eprintln!("       spike e2e <base.img> [handle]");
+    eprintln!("       spike parallel <base.img> [n]");
     exit(2);
 }

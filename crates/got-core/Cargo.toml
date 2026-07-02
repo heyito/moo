@@ -1,0 +1,12 @@
+[package]
+name = "got-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+got-vmm = { path = "../got-vmm" }
+got-store = { path = "../got-store" }

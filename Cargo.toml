@@ -1,8 +1,30 @@
 [workspace]
 resolver = "2"
-members = ["crates/spike", "crates/guest-agent"]
-default-members = ["crates/spike"]
+members = [
+    "crates/spike",
+    "crates/guest-agent",
+    "crates/got-vmm",
+    "crates/got-store",
+    "crates/got-core",
+    "crates/got-cli",
+]
+default-members = [
+    "crates/spike",
+    "crates/got-vmm",
+    "crates/got-store",
+    "crates/got-core",
+    "crates/got-cli",
+]
 
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+libc = "0.2"
+blake3 = { version = "1", features = ["mmap", "rayon"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
