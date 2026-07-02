@@ -63,6 +63,7 @@ extern "C" {
         input_fd: i32,
         output_fd: i32,
     ) -> i32;
+    fn krun_set_port_map(ctx_id: u32, port_map: *const *const c_char) -> i32;
     fn krun_start_enter(ctx_id: u32) -> i32;
 }
 
@@ -91,6 +92,9 @@ pub struct MachineConfig<'a> {
     pub cpus: u8,
     pub ram_mib: u32,
     pub console_log: &'a str,
+    /// "host:guest" TCP port pairs. Empty = expose every listening guest
+    /// port on the same host port number.
+    pub port_map: Vec<String>,
     /// Read end of the host-to-guest pipe (guest agent input).
     pub serial_input_fd: RawFd,
     /// Write end of the guest-to-host pipe (guest agent output).
@@ -112,8 +116,13 @@ fn check(rc: i32, what: &str) -> Result<()> {
 /// calling process becomes the machine and exits when the guest powers off.
 /// Returns only on configuration failure.
 pub fn enter(cfg: &MachineConfig) -> Result<()> {
+    // Internal debug knob; never documented, never in user-facing output.
+    let log_level: u32 = std::env::var("GOT_ENGINE_LOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     unsafe {
-        check(krun_set_log_level(0), "log level")?;
+        check(krun_set_log_level(log_level), "log level")?;
         let ctx = krun_create_ctx();
         check(ctx, "context")?;
         let ctx = ctx as u32;
@@ -155,6 +164,13 @@ pub fn enter(cfg: &MachineConfig) -> Result<()> {
             ),
             "exec port",
         )?;
+
+        if !cfg.port_map.is_empty() {
+            let entries: Vec<CString> = cfg.port_map.iter().map(|p| cstr(p)).collect();
+            let mut ptrs: Vec<*const c_char> = entries.iter().map(|e| e.as_ptr()).collect();
+            ptrs.push(std::ptr::null());
+            check(krun_set_port_map(ctx, ptrs.as_ptr()), "port map")?;
+        }
 
         let log_path = cstr(cfg.console_log);
         check(krun_set_console_output(ctx, log_path.as_ptr()), "console log")?;

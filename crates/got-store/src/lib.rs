@@ -100,6 +100,10 @@ pub struct Machine {
     pub lifecycle: String,
     pub detached: bool,
     pub created_at: i64,
+    pub cpus: u8,
+    pub ram_mib: u32,
+    /// "host:guest" pairs, comma-separated. Empty = expose all guest ports.
+    pub port_map: String,
 }
 
 #[derive(Debug, Clone)]
@@ -131,7 +135,10 @@ impl Registry {
                  overlay_path    TEXT NOT NULL,
                  lifecycle       TEXT NOT NULL DEFAULT 'live',
                  detached        INTEGER NOT NULL DEFAULT 0,
-                 created_at      INTEGER NOT NULL
+                 created_at      INTEGER NOT NULL,
+                 cpus            INTEGER NOT NULL DEFAULT 2,
+                 ram_mib         INTEGER NOT NULL DEFAULT 4096,
+                 port_map        TEXT NOT NULL DEFAULT ''
              );
              CREATE TABLE IF NOT EXISTS snapshots (
                  snapshot_id   TEXT PRIMARY KEY,
@@ -144,6 +151,14 @@ impl Registry {
              CREATE INDEX IF NOT EXISTS idx_snapshots_handle_sha
                  ON snapshots(handle, head_sha);",
         )?;
+        // Pre-release schema additions; harmless when the column exists.
+        for stmt in [
+            "ALTER TABLE machines ADD COLUMN cpus INTEGER NOT NULL DEFAULT 2",
+            "ALTER TABLE machines ADD COLUMN ram_mib INTEGER NOT NULL DEFAULT 4096",
+            "ALTER TABLE machines ADD COLUMN port_map TEXT NOT NULL DEFAULT ''",
+        ] {
+            let _ = conn.execute(stmt, []);
+        }
         Ok(Self { conn })
     }
 
@@ -151,8 +166,8 @@ impl Registry {
         self.conn.execute(
             "INSERT INTO machines
              (handle, base_commit, recipe_hash, parent_machine, base_image_path,
-              overlay_path, lifecycle, detached, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              overlay_path, lifecycle, detached, created_at, cpus, ram_mib, port_map)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 m.handle,
                 m.base_commit,
@@ -163,55 +178,52 @@ impl Registry {
                 m.lifecycle,
                 m.detached as i64,
                 m.created_at,
+                m.cpus as i64,
+                m.ram_mib as i64,
+                m.port_map,
             ],
         )?;
         Ok(())
+    }
+
+    const MACHINE_COLS: &'static str =
+        "handle, base_commit, recipe_hash, parent_machine, base_image_path,
+         overlay_path, lifecycle, detached, created_at, cpus, ram_mib, port_map";
+
+    fn row_to_machine(r: &rusqlite::Row) -> rusqlite::Result<Machine> {
+        Ok(Machine {
+            handle: r.get(0)?,
+            base_commit: r.get(1)?,
+            recipe_hash: r.get(2)?,
+            parent_machine: r.get(3)?,
+            base_image_path: r.get(4)?,
+            overlay_path: r.get(5)?,
+            lifecycle: r.get(6)?,
+            detached: r.get::<_, i64>(7)? != 0,
+            created_at: r.get(8)?,
+            cpus: r.get::<_, i64>(9)? as u8,
+            ram_mib: r.get::<_, i64>(10)? as u32,
+            port_map: r.get(11)?,
+        })
     }
 
     pub fn get_machine(&self, handle: &str) -> Result<Option<Machine>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT handle, base_commit, recipe_hash, parent_machine,
-                        base_image_path, overlay_path, lifecycle, detached, created_at
-                 FROM machines WHERE handle = ?1",
+                &format!("SELECT {} FROM machines WHERE handle = ?1", Self::MACHINE_COLS),
                 params![handle],
-                |r| {
-                    Ok(Machine {
-                        handle: r.get(0)?,
-                        base_commit: r.get(1)?,
-                        recipe_hash: r.get(2)?,
-                        parent_machine: r.get(3)?,
-                        base_image_path: r.get(4)?,
-                        overlay_path: r.get(5)?,
-                        lifecycle: r.get(6)?,
-                        detached: r.get::<_, i64>(7)? != 0,
-                        created_at: r.get(8)?,
-                    })
-                },
+                Self::row_to_machine,
             )
             .optional()?)
     }
 
     pub fn list_machines(&self) -> Result<Vec<Machine>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT handle, base_commit, recipe_hash, parent_machine,
-                    base_image_path, overlay_path, lifecycle, detached, created_at
-             FROM machines ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Machine {
-                handle: r.get(0)?,
-                base_commit: r.get(1)?,
-                recipe_hash: r.get(2)?,
-                parent_machine: r.get(3)?,
-                base_image_path: r.get(4)?,
-                overlay_path: r.get(5)?,
-                lifecycle: r.get(6)?,
-                detached: r.get::<_, i64>(7)? != 0,
-                created_at: r.get(8)?,
-            })
-        })?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM machines ORDER BY created_at",
+            Self::MACHINE_COLS
+        ))?;
+        let rows = stmt.query_map([], Self::row_to_machine)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 

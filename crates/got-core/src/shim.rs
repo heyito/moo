@@ -32,8 +32,20 @@ pub fn sanitize(handle: &str) -> String {
 
 /// Entry point for the hidden `__shim` subcommand. Blocks until the guest
 /// powers off. The caller (got new) has already set the loader path so the
-/// forked guest can find its firmware.
-pub fn run(handle: &str, overlay: &str, cpus: u8, ram_mib: u32) -> Result<()> {
+/// forked guest can find its firmware. Everything else about the machine
+/// (overlay, resources, ports) comes from its registry row.
+pub fn run(handle: &str) -> Result<()> {
+    let machine = Registry::open()?
+        .get_machine(handle)?
+        .with_context(|| format!("no machine '{}'", handle))?;
+    let overlay = machine.overlay_path.clone();
+    let port_map: Vec<String> = machine
+        .port_map
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
     std::fs::create_dir_all(runtime_dir())?;
     let sock = socket_path(handle);
     let _ = std::fs::remove_file(&sock);
@@ -59,10 +71,11 @@ pub fn run(handle: &str, overlay: &str, cpus: u8, ram_mib: u32) -> Result<()> {
             libc::close(g2h[0]);
         }
         let cfg = got_vmm::MachineConfig {
-            overlay,
-            cpus,
-            ram_mib,
+            overlay: &overlay,
+            cpus: machine.cpus,
+            ram_mib: machine.ram_mib,
             console_log: console_log.to_str().unwrap(),
+            port_map,
             serial_input_fd: h2g[0],
             serial_output_fd: g2h[1],
         };

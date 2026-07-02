@@ -1,5 +1,6 @@
 //! Lifecycle orchestration for the four verbs (plan.md §6).
 
+pub mod config;
 pub mod git;
 pub mod shim;
 
@@ -9,9 +10,6 @@ use got_store::{
 };
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-const DEFAULT_CPUS: u8 = 2;
-const DEFAULT_RAM_MIB: u32 = 4096;
 
 /// The default base image for machines. The MVP ships prebuilt images;
 /// until the fetch pipeline lands, `got doctor` explains how to build one.
@@ -24,20 +22,24 @@ fn overlay_path(handle: &str) -> PathBuf {
 }
 
 /// Spawn the detached supervisor for `handle` and wait for its socket.
-fn boot(handle: &str, overlay: &Path) -> Result<()> {
+fn boot(handle: &str) -> Result<()> {
     let exe = std::env::current_exe().context("locate own binary")?;
+    // Internal debug: keep the supervisor's stderr when engine logging is on.
+    let stderr = if std::env::var("GOT_ENGINE_LOG").is_ok() {
+        let f = std::fs::File::create(
+            got_store::runtime_dir().join(format!("{}.engine.log", shim::sanitize(handle))),
+        )?;
+        std::process::Stdio::from(f)
+    } else {
+        std::process::Stdio::null()
+    };
+    std::fs::create_dir_all(got_store::runtime_dir())?;
     std::process::Command::new(exe)
-        .args([
-            "__shim",
-            handle,
-            overlay.to_str().context("bad overlay path")?,
-            &DEFAULT_CPUS.to_string(),
-            &DEFAULT_RAM_MIB.to_string(),
-        ])
+        .args(["__shim", handle])
         .env(got_vmm::LOADER_PATH_VAR, got_vmm::loader_path_value())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr)
         .spawn()
         .context("start machine supervisor")?;
 
@@ -49,6 +51,43 @@ fn boot(handle: &str, overlay: &Path) -> Result<()> {
         std::thread::sleep(Duration::from_millis(10));
     }
     bail!("machine '{}' did not come up", handle);
+}
+
+/// Deterministic per-handle host ports for the project's guest ports
+/// (plan.md §7). The candidate derives from a stable hash of
+/// (handle, guest port); collisions with ports already in use on the host
+/// probe forward until a free one is found.
+fn allocate_ports(handle: &str, guest_ports: &[u16]) -> Vec<(u16, u16)> {
+    const RANGE_START: u32 = 20000;
+    const RANGE_LEN: u32 = 10000;
+    let mut taken: Vec<u16> = Vec::new();
+    let mut map = Vec::new();
+    for &guest in guest_ports {
+        let mut h = blake3::Hasher::new();
+        h.update(handle.as_bytes());
+        h.update(&guest.to_le_bytes());
+        let seed = u32::from_le_bytes(h.finalize().as_bytes()[..4].try_into().unwrap());
+        let mut candidate = RANGE_START + (seed % RANGE_LEN);
+        for _ in 0..RANGE_LEN {
+            let port = candidate as u16;
+            let free = !taken.contains(&port)
+                && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+            if free {
+                taken.push(port);
+                map.push((port, guest));
+                break;
+            }
+            candidate = RANGE_START + ((candidate - RANGE_START + 1) % RANGE_LEN);
+        }
+    }
+    map
+}
+
+fn format_port_map(map: &[(u16, u16)]) -> String {
+    map.iter()
+        .map(|(h, g)| format!("{}:{}", h, g))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Stop a running machine gracefully (quiesce + power off) and wait.
@@ -99,7 +138,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
                     std::fs::remove_file(&overlay)?;
                 }
                 cow_clone(Path::new(&snap.snapshot_path), &overlay)?;
-                boot(name, &overlay)?;
+                boot(name)?;
                 return Ok(NewOutcome {
                     handle: name.to_string(),
                     restored_from: Some(snap),
@@ -108,7 +147,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
             }
         }
         if !shim::is_running(name) {
-            boot(name, &overlay)?;
+            boot(name)?;
         }
         return Ok(NewOutcome {
             handle: name.to_string(),
@@ -189,19 +228,25 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
     }
     cow_clone(&source_disk, &overlay)?;
 
+    let (cfg, root) = config::load()?;
+    let port_map = allocate_ports(name, &cfg.network.ports);
+
     reg.insert_machine(&Machine {
         handle: name.to_string(),
         base_commit,
-        recipe_hash: "default".into(),
+        recipe_hash: cfg.recipe_hash(&root),
         parent_machine: parent,
         base_image_path: default_base_image().to_string_lossy().into_owned(),
         overlay_path: overlay.to_string_lossy().into_owned(),
         lifecycle: "live".into(),
         detached,
         created_at: timestamp(),
+        cpus: cfg.cpus(),
+        ram_mib: cfg.ram_mib(),
+        port_map: format_port_map(&port_map),
     })?;
 
-    boot(name, &overlay)?;
+    boot(name)?;
     Ok(NewOutcome {
         handle: name.to_string(),
         restored_from,
@@ -217,8 +262,7 @@ pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
     }
     if !shim::is_running(name) {
         // Machines persist between invocations; reboot the live overlay.
-        let m = reg.get_machine(name)?.unwrap();
-        boot(name, Path::new(&m.overlay_path))?;
+        boot(name)?;
     }
     shim::request(name, cmd.as_bytes())
 }
@@ -236,6 +280,20 @@ pub fn save_machine(name: &str) -> Result<SaveOutcome> {
         .with_context(|| format!("no machine '{}'", name))?;
 
     if shim::is_running(name) {
+        // Project-defined quiesce commands (DB checkpoints etc.) run first,
+        // then the built-in filesystem sync (plan.md §6.3).
+        let (cfg, _) = config::load()?;
+        for cmd in &cfg.quiesce.commands {
+            let (code, out) = shim::request(name, cmd.as_bytes())?;
+            if code != 0 {
+                eprintln!(
+                    "got: warning: quiesce command failed in '{}' (exit {}): {}",
+                    name,
+                    code,
+                    String::from_utf8_lossy(&out).trim()
+                );
+            }
+        }
         let (code, out) = shim::request(name, got_vmm::proto::QUIESCE)?;
         if code != 0 {
             bail!(

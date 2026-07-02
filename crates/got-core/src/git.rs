@@ -22,3 +22,8 @@ pub fn resolve(refish: &str) -> Option<String> {
 pub fn shadowed_head(handle: &str) -> Option<String> {
     resolve(&format!("refs/heads/{}", handle)).or_else(|| resolve("HEAD"))
 }
+
+/// The repository's top-level directory, if inside one.
+pub fn toplevel() -> Option<std::path::PathBuf> {
+    git(&["rev-parse", "--show-toplevel"]).map(std::path::PathBuf::from)
+}

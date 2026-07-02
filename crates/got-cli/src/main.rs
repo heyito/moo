@@ -179,7 +179,10 @@ fn cmd_ls() -> Result<i32> {
         println!("no machines");
         return Ok(0);
     }
-    println!("{:<24} {:<8} {:<14} snapshots", "HANDLE", "STATE", "BASE COMMIT");
+    println!(
+        "{:<24} {:<8} {:<14} {:<22} snapshots",
+        "HANDLE", "STATE", "BASE COMMIT", "PORTS (host->guest)"
+    );
     for row in rows {
         let state = if row.running { "running" } else { &row.machine.lifecycle };
         let base = row
@@ -188,11 +191,22 @@ fn cmd_ls() -> Result<i32> {
             .as_deref()
             .map(|s| &s[..s.len().min(12)])
             .unwrap_or("-");
+        let ports = if row.machine.port_map.is_empty() {
+            "(all, 1:1)".to_string()
+        } else {
+            row.machine
+                .port_map
+                .split(',')
+                .map(|p| p.replacen(':', "->", 1))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         println!(
-            "{:<24} {:<8} {:<14} {}",
+            "{:<24} {:<8} {:<14} {:<22} {}",
             row.machine.handle,
             state,
             base,
+            ports,
             row.snapshots.len()
         );
         for s in &row.snapshots {
@@ -272,9 +286,9 @@ fn cmd_doctor() -> Result<i32> {
 }
 
 fn cmd_shim(args: &[String]) -> Result<i32> {
-    let [handle, overlay, cpus, ram] = args else {
+    let [handle] = args else {
         bail!("internal: bad supervisor invocation");
     };
-    got_core::shim::run(handle, overlay, cpus.parse()?, ram.parse()?)?;
+    got_core::shim::run(handle)?;
     Ok(0)
 }
