@@ -1,670 +1,743 @@
 # got — Technical Plan
 
-This document covers the microVM technology decision and the architecture/roadmap for
-building `got`: a tool that pairs every git branch/worktree with a persistent,
-snapshottable microVM so that application runtime state travels with the ref.
+`got` is a single primitive: a `machine`. A hardware-isolated Linux runtime
+with a copy-on-write disk, descended from a content-addressed golden image,
+identified by a stable user-chosen handle. Four verbs: `new`, `run`, `save`,
+`drop`. Read [vision.md](vision.md) first for the framing.
 
-Read `vision.md` first for the product framing. This document is the *how*.
+This document is the *how*: the microVM technology decision, the storage and
+lifecycle model, the CLI, and the phased roadmap for shipping the primitive
+without shipping anything else.
 
 ---
 
 ## 1. Problem statement (engineering terms)
 
-We need a system where:
+We need a single-binary CLI that:
 
-1. Each git ref (branch) and/or worktree maps to an isolated Linux runtime with its
-   own kernel, filesystem, processes, and network namespace.
-2. That runtime's **disk and process state persists** across branch switches and is
-   **restored** when the ref is revisited.
-3. Creating a branch **copy-on-write clones** the parent runtime (instant, cheap).
-4. Multiple runtimes can be **active simultaneously** without port, database, or
-   filesystem collisions (parallel agents / worktrees).
-5. It runs **natively on macOS Apple Silicon** (primary dev target here) and on
-   **Linux** (CI, remote, Linux devs).
-6. A clean environment is always reproducible from a declared golden image.
+1. Creates hardware-isolated Linux microVMs on macOS Apple Silicon and Linux
+   in under a second, with no root and no daemon.
+2. Gives each machine its own copy-on-write disk descended from a
+   content-addressed golden image (base ref + recipe hash).
+3. Runs multiple machines in parallel without collisions on ports, files, or
+   OS resources.
+4. Records provenance — `(base_commit, recipe_hash, parent_machine)` — at
+   creation, so a machine is reproducible and inspectable.
+5. Snapshots machine state on demand and associates each snapshot with the
+   current git HEAD SHA of the ref the handle shadows, so
+   `git checkout <sha>` + `got new <name>` restores the exact runtime that
+   existed at that commit.
+6. Exposes exactly four verbs to the outside world: `new`, `run`, `save`,
+   `drop`. Everything an agent or a developer might want to do composes from
+   those four plus the git verbs they already have.
 
-The hard, differentiating requirements are (2) state persistence + (5) native macOS.
+The hard, differentiating requirements are (1) native macOS microVMs with no
+root, (2) content-addressed provenance, (5) commit-tied snapshots, and (6)
+the discipline to expose nothing else.
 
 ## 2. Goals and non-goals
 
 **Goals**
-- Local-first, single-binary CLI with git-like verbs.
-- Per-branch microVM lifecycle: create, start, pause, snapshot, resume, fork, destroy.
-- Copy-on-write disk model for instant branch forking and cheap storage.
-- Declarative environment definition (`got.toml`) → reproducible golden image.
-- Automatic port/hostname allocation so parallel VMs don't collide.
-- Pluggable VMM driver so we're not locked to one hypervisor.
+- Single binary CLI. Four verbs. One noun.
+- Native macOS Apple Silicon (primary) and Linux (secondary) via the same
+  hypervisor library, no per-platform code paths for the core operations.
+- Sub-second CoW machine forks (APFS `clonefile`, reflink, ZFS).
+- Content-addressed golden image; hash of (base ref + `got.toml` + lockfiles).
+- Machine lifecycle independent of git ref/worktree lifecycle; handles are
+  user-chosen labels that may or may not shadow git refs.
+- Idempotent `got new` — existing handle returns existing machine or the
+  snapshot matching the current git HEAD if one is saved.
+- **Commit-associated snapshots.** `got save` quiesces the machine,
+  CoW-clones the overlay to `~/.got/snapshots/<content_hash>`, and records
+  `(handle, head_sha, snapshot_hash)` so `got new <name>` can restore the
+  exact runtime that matched a given commit.
+- **Content-addressed snapshot storage** — byte-identical overlays share the
+  same file on disk.
+- Backend-neutral public surface — hypervisor names never appear in any
+  command, config, or error a user sees.
 
 **Non-goals (initially)**
-- Being a general container runtime or a Kubernetes replacement.
-- A hosted/managed cloud service (the primitives allow it later; not v1).
-- GUI. CLI + optional TUI first.
-- Windows guest support (Linux guests only).
-- Live migration between hosts (v-future).
+- General container runtime. `got` is not Docker.
+- Hosted platform. Local-first; remote-compatible primitives added later.
+- GUI. CLI only.
+- Windows guest support. Linux guests only.
+- Live memory-state migration between hosts.
+- Snapshot push/pull as a first-class network protocol — v-future.
+- `got.toml` as a service graph. No `[[services]]`, `depends_on`, `health`.
+  `got.toml` records the base image reference and build recipe inputs; no
+  runtime declarations.
+- MCP server as the primary surface. A thin `new`/`run`/`save`/`drop` MCP
+  adapter can ship in M2; the primary and only stable surface in v1 is the
+  CLI.
+- Reverse proxy or `*.got.test` DNS. Machines expose ports on localhost;
+  routing is the caller's responsibility.
+- Wrapping any git verb. `got` never runs `git worktree add`, `git switch`,
+  `git commit`, or `git branch`. Git and got are orthogonal by default.
+  Users who want automatic coupling opt in via `got hook install` (§8.1),
+  which places fail-silent hook scripts in `.git/hooks/` that invoke `got`
+  on git checkpoints — reversible with `got hook uninstall`. `got` never
+  installs hooks itself.
+- Attempt ledgers, egress policies, and secret injection as v1 product
+  surfaces. Isolation is enforced by the microVM boundary; policy is a v2+
+  concern.
+- Agent-specific verbs (`--agent claude`, `got try spawn`, etc.). Agents
+  compose the four verbs and their own git verbs.
 
 ## 3. MicroVM technology decision
 
 ### 3.1 Hard constraint: the host is macOS Apple Silicon
 
-The single most important fact: **Firecracker and Cloud Hypervisor require KVM and only
-run on Linux.** They cannot run natively on macOS. Apple Silicon has no KVM; the only
-hypervisor interface is Apple's **Hypervisor.framework (HVF)**. Nested virtualization
-exists on M3/M4 but is fragile and not a foundation to bet the core UX on.
+Firecracker and Cloud Hypervisor require KVM and only run on Linux. Apple
+Silicon has no KVM; the only hypervisor interface is Apple's
+**Hypervisor.framework (HVF)**. Nested virtualization on M3/M4 exists but is
+fragile.
 
-So the *native macOS* open-source options narrow to VMMs that speak HVF:
-
+Native macOS options that speak HVF:
 - **libkrun** — a library VMM (Red Hat) that uses **KVM on Linux and
-  Hypervisor.framework on macOS**. Same code path, both platforms. This is the key
-  differentiator called out repeatedly in the sandbox landscape.
-- **QEMU** — cross-platform, HVF-accelerated on macOS, mature `savevm`/`loadvm`
-  snapshots, but heavier and slower to boot; a `microvm` machine type exists.
-- **Apple Virtualization.framework (VZ)** — macOS-only, fast, and uniquely supports
-  **full memory save/restore** (`saveMachineStateTo`). Great snapshotting, but not
-  portable to Linux.
+  Hypervisor.framework on macOS**. Same code path, both platforms.
+- **QEMU** — cross-platform, HVF-accelerated, mature snapshots, heavy boot.
+- **Apple VZ** — macOS-only, native, best memory-snapshot story on macOS.
 
 ### 3.2 Comparison
 
-| VMM | macOS (Apple Silicon) | Linux | Boot | Per-VM kernel | Mem snapshot/restore | Footprint | Notes |
-|---|---|---|---|---|---|---|---|
-| **libkrun** | ✅ (HVF) | ✅ (KVM) | <100–200ms | ✅ | ❌ none today (unmerged prototype, see §3.4) | tiny | Only mature cross-platform library VMM; powers Microsandbox, SmolVM, podman `krunkit`, OpenShell |
-| **Firecracker** | ❌ | ✅ (KVM) | ~125ms | ✅ | ✅ excellent | tiny | Best-in-class snapshots, but Linux-only; great as a *Linux/remote* driver |
-| **Cloud Hypervisor** | ❌ | ✅ (KVM) | fast | ✅ | ✅ | small | More device support than Firecracker; Linux-only |
-| **QEMU (microvm)** | ✅ (HVF) | ✅ (KVM) | ~1s | ✅ | ✅ mature | medium | Portable fallback; heavier, slower boot |
-| **Apple VZ** | ✅ | ❌ | fast | ✅ | ✅ (state save) | medium | macOS-only; best memory-snapshot story *on macOS* |
+| VMM              | macOS (Apple Silicon) | Linux     | Boot    | Per-VM kernel | Footprint |
+|------------------|-----------------------|-----------|---------|---------------|-----------|
+| **libkrun**      | yes (HVF)             | yes (KVM) | <200 ms | yes           | tiny      |
+| Firecracker      | no                    | yes (KVM) | ~125 ms | yes           | tiny      |
+| Cloud Hypervisor | no                    | yes (KVM) | fast    | yes           | small     |
+| QEMU (microvm)   | yes (HVF)             | yes (KVM) | ~1 s    | yes           | medium    |
+| Apple VZ         | yes                   | no        | fast    | yes           | medium    |
 
 ### 3.3 Decision
 
-**Adopt `libkrun` as the default cross-platform microVM backend, behind a pluggable
-`got` VMM driver interface.**
+**Adopt libkrun as the default hypervisor on both macOS and Linux.**
 
-Rationale:
-- It is the **only mature open-source VMM that runs the same way on macOS Apple Silicon
-  and Linux**, which is exactly our host matrix. This removes the biggest risk (native
-  macOS support) with a single dependency.
-- It has a proven track record in precisely this problem space: **Microsandbox**
-  (Apache-2.0, libkrun, <100ms boot, no daemon/no root), **SmolVM**, podman's
-  `krunkit`, and NVIDIA's **OpenShell** all build on it.
-- It boots in ~100–200ms with a per-VM kernel → real hardware isolation, cheap enough
-  to run one per branch.
-- Apache-2.0/LGPL licensing is compatible with an open-source product.
+It is the only mature open-source library VMM with the same code path on
+macOS Apple Silicon (HVF) and Linux (KVM). It boots in ~100–200 ms per-VM
+with real hardware isolation, requires no root and no daemon, and is proven
+in this problem space by Microsandbox, SmolVM, podman `krunkit`, and NVIDIA
+OpenShell.
 
-**Driver abstraction is warranted for two reasons** — but we *design* the seam early and
-*abstract* it late (see §12): (1) libkrun's weak spot is **live memory snapshotting**
-(pause a VM with running processes, persist RAM+CPU state, resume later), which is
-**absent from every shipping libkrun today** (§3.4); and (2) libkrun's default macOS
-networking (**TSI**, §3.4/§7) is fast and root-free but has real limits (no raw/ICMP
-sockets, no inbound UDP-listen from the guest), so apps needing faithful networking
-eventually need a `gvproxy`/`vmnet` NetDriver. The engines we can slot in per
-platform/phase:
+**Bind libkrun directly via its upstream C ABI, pinned to `stable-1.19.x`,
+dynamically linked (LGPL-2.1).** We do not build on Microsandbox and do not
+adopt its `msb_krun` Rust fork — both would stack our abstraction on
+another team's abstraction, and the storage/lifecycle primitives that make
+`got` unique need direct control of the C ABI (block-device attach, sync
+mode, CoW clone timing). Microsandbox is a reference implementation we
+learn from — specifically its **OCI → EROFS + VMDK + ext4-overlay rootfs
+conversion** — but we do not depend on it at runtime.
 
-- **macOS default:** `libkrun` (footprint, boot, cross-platform parity).
-- **Linux default:** **also `libkrun` (on KVM)** — it already works on Linux and gives
-  us macOS/Linux code-path parity, our #1 differentiator. Do **not** default to CH/FC on
-  Linux; they add jailer/tap/root ops burden for zero M1 benefit.
-- **macOS memory-snapshot (Phase 3):** `Apple VZ` driver as an alternate for
-  full-state save/restore of live processes (note the Model-B coupling in §12/M3).
-- **Linux memory-snapshot / remote / CI (Phase 3+):** `Cloud Hypervisor` or
-  `Firecracker` for best-in-class snapshot + jailer isolation.
-- **Portable fallback:** `QEMU`.
+**We build the features Microsandbox already ships (MCP, snapshots, SDKs)
+only if and when the primitive itself demands them.** Save via CoW clone
+demands them now (§5.3, §6.3). Backend swap to Firecracker/CH on Linux or
+Apple VZ on macOS is a v2+ concern for memory snapshots, gated behind an
+internal driver seam that is designed early and extracted late (§4.3).
 
-**Build-vs-reuse — decided: bind `libkrun` directly.** We do **not** write a
-hypervisor, and we do **not** build on Microsandbox. The primary reason is **layering**,
-not "ephemerality": building on Microsandbox would stack `got`'s `VmmDriver` abstraction
-on top of Microsandbox's own VM abstraction *and* its `msb_krun` Rust fork of libkrun — a
-double indirection that breaks the moment we add the M3 memory-snapshot drivers (Cloud
-Hypervisor/Firecracker on Linux, Apple VZ on macOS) that Microsandbox has no notion of.
-(To be accurate: Microsandbox is **not** purely ephemeral — it ships persistent named
-virtio-blk volumes, snapshots, and stop/start state. But its model is *single-writer per
-block device* with fork-by-snapshot/copy, whereas `got` needs *live CoW branch forks*
-via `clonefile`/reflink — a different storage thesis.) The features Microsandbox would
-give us (MCP, agent SDKs, no-daemon) are mostly ones we don't need or want to own.
+**The hypervisor never leaks into the public surface.** Users see the noun
+`machine` and four verbs. `libkrun`, `krunfw`, `HVF`, and any driver name
+are internal.
 
-We therefore bind **libkrun directly via its upstream C ABI** (FFI from Rust), pinned to
-the **`stable-1.19.x`** release branch (the version Homebrew/krunkit ship; `main` is
-libkrun 2.0 and is explicitly ABI-unstable). This gives us low-level control over block
-devices and snapshot semantics that is the actual product surface.
+### 3.4 Validated technical assumptions (libkrun `stable-1.19.x`)
 
-> **Correction / clarification:** Microsandbox does **not** call libkrun through its C
-> ABI. It consumes a **native-Rust fork of libkrun** (the `msb_krun*` crates from
-> `zerocore-ai/libkrun`) and drives it with `VmBuilder`/`Vm::enter()`. So Microsandbox
-> proves the *fork-to-Rust* path, **not** the C-ABI-FFI path. We deliberately **do not**
-> adopt `msb_krun`: depending on a third-party fork of libkrun is the same "double-stack
-> another team's abstraction" trap we reject for Microsandbox itself, and it forfeits
-> upstream fixes. The real proof the C ABI is FFI-friendly is its C consumers
-> (krunvm/crun), plus §3.4's spike.
+Verified against the public C header and the krunkit/podman-machine
+consumers:
 
-Microsandbox (Apache-2.0) is still kept as a **reference implementation** to mine for
-two things: its **VM launch/lifecycle logic** (translated from `msb_krun` calls to the
-equivalent C-ABI calls) and its **OCI-image → bootable-rootfs conversion** — which is a
-concrete, non-trivial design we port/vendor: per-layer **EROFS** (read-only) stitched
-into one read-only virtio-blk via a **VMDK flat descriptor**, plus a writable **ext4
-"upper"** virtio-blk, assembled with **overlayfs inside the guest** (libkrun injects its
-own init even for block roots). This is more than "learn from"; budget for it in M0.
-Licensing: libkrun is LGPL-2.1, so we **dynamically link** it (`libkrun.dylib` on macOS)
-to keep `got`'s own license unconstrained.
+- **virtio-blk on macOS/HVF — confirmed.** `krun_add_disk2(ctx, block_id,
+  path, format, read_only)` attaches raw + qcow2 data disks. `krun_add_disk3`
+  adds `direct_io` + sync mode. `krun_set_root_disk`/`krun_set_data_disk`
+  are deprecated in 1.x and removed in 2.0; target `krun_add_disk2/3`.
+  Verify build flags at runtime with `krun_has_feature(KRUN_FEATURE_BLK)`.
+- **virtio-fs on macOS — confirmed** via `krun_add_virtiofs(ctx, tag, path)`.
+  Root uses the reserved tag `/dev/root`. Not used in v1 (Model B default).
+- **Host↔guest exec channel — nuanced.** vsock works via
+  `krun_add_vsock_port(...)`, but on macOS is bridged to a host UNIX socket,
+  not real `AF_VSOCK`. Microsandbox chose virtio-serial for its guest agent
+  on macOS. Bake-off in M0.
+- **Root-free port forwarding — confirmed.** libkrun's built-in **TSI**
+  (Transparent Socket Impersonation) gives outbound connectivity and
+  host-reachable guest ports via `krun_set_port_map(["host:guest", …])` with
+  no helper process and no root. TSI is TCP/UDP AF_INET/INET6 only (no
+  raw/ICMP), no inbound UDP-listen from the guest, and requires the custom
+  `libkrunfw` kernel.
+- **Guest-triggered quiesce (for save) — confirmed.** The guest exec agent
+  can run `sync`, DB-specific checkpoint commands (e.g. Postgres `CHECKPOINT`,
+  SQLite `PRAGMA wal_checkpoint(TRUNCATE)`), and signal completion; the host
+  then runs `F_FULLFSYNC` on the overlay file before `clonefile`. This is
+  the same ordering the CoW-fork path uses (§5.1).
+- **Memory snapshot/restore — does not exist** in shipping libkrun (neither
+  `stable-1.19.x` nor 2.0 `main`). Unmerged, design-contested prototype.
+  Not roadmapped. Save is a **disk-state snapshot**, not a memory snapshot;
+  the machine is quiesced before save, not paused-in-flight.
+- **macOS packaging.** Any HVF caller must be codesigned with
+  `com.apple.security.hypervisor` (ad-hoc OK, no paid cert) plus
+  `com.apple.security.cs.disable-library-validation` to load Homebrew
+  `libkrun.dylib`. No root/sudo needed to run VMs.
+- **Guest kernel.** libkrun boots a firmware bundle, **`libkrunfw`** — a
+  separate build artifact we vendor/ship. TSI networking depends on it.
 
-> **Key insight that de-risks v1:** the headline use case ("my migration stays with the
-> branch") is a **disk-state** problem, not a memory-state problem. Database data,
-> migrations, installed deps, and artifacts all live on a **persistent block device**.
-> We can deliver the core value with libkrun + copy-on-write disks *without* memory
-> snapshots. Live-process resume (memory snapshots) is a Phase-3 enhancement, not a
-> prerequisite.
-
-### 3.4 Validated technical assumptions (libkrun `stable-1.19.x`, verified against the C API + krunkit)
-
-The v1 thesis depends on libkrun capabilities that we confirmed against the public C
-header and the krunkit/podman-machine consumers, not just assumed:
-
-- **virtio-blk on macOS/HVF — ✅ confirmed.** `krun_add_disk2(ctx, block_id, path,
-  format, read_only)` (raw + qcow2) and `krun_add_disk3(…, direct_io, sync_mode)` attach
-  one or more raw data disks (`/dev/vda…vdz`); macOS-specific sync semantics are baked
-  into the API. This is the single fact the whole v1 rests on, and it holds. **Note:**
-  `krun_set_root_disk`/`krun_set_data_disk` (an obvious API to reach for) are
-  **deprecated in 1.x and removed in 2.0** — target `krun_add_disk2/3`. virtio-blk is a
-  **build-time feature** (`BLK=1`); verify via `krun_has_feature(KRUN_FEATURE_BLK)` on
-  the actual dylib.
-- **virtio-fs on macOS — ✅ confirmed** via `krun_add_virtiofs(ctx, tag, path)` (root
-  uses the reserved tag `/dev/root`). No host-side directory isolation is provided; that
-  is the embedder's job.
-- **Host↔guest channel — ✅ but nuanced.** vsock works via `krun_add_vsock_port(ctx,
-  port, unix_socket_path)`, but on macOS it is **not real `AF_VSOCK`** — the VMM bridges
-  it to a host **UNIX socket**. Microsandbox deliberately chose **virtio-serial** over
-  vsock for its guest agent on macOS, which is a signal to spike both (see §12/M0).
-- **Root-free port forwarding — ✅ confirmed, and simpler than this plan assumed.**
-  libkrun's built-in **TSI** (Transparent Socket Impersonation) gives outbound
-  connectivity + host-reachable guest ports via `krun_set_port_map(["host:guest", …])`
-  with **no helper process and no root**. TSI requires the custom **libkrunfw** kernel
-  and does not support raw/ICMP sockets or inbound UDP-listen from the guest.
-- **Memory snapshot/restore — ❌ does not exist** in any shipping libkrun (neither
-  `stable-1.19.x` nor 2.0 `main`). It is an **unmerged, design-contested prototype**
-  (RFC #748, PRs #762/#767) that maintainers have not agreed to accept, with lazy-CoW,
-  per-device state for virtio-blk/vsock, virtio-fs/TSI snapshot, and clone-reseed all
-  still unsolved. Treat it as **not roadmapped**; memory snapshots come from alternate
-  drivers in Phase 3, not from libkrun.
-- **macOS packaging is not "just a static binary."** Any HVF caller — including the
-  `got` binary itself — must be **codesigned with `com.apple.security.hypervisor`**
-  (ad-hoc signing is fine, no paid cert) **plus `com.apple.security.cs.disable-library-
-  validation`** to load the Homebrew `libkrun.dylib`. No root/sudo is needed to run VMs.
-- **We ship a guest kernel.** libkrun boots a firmware bundle, **`libkrunfw`** — a
-  separate build artifact we must vendor/ship; TSI networking depends on it.
-
-## 4. Architecture overview
+## 4. Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  got CLI  (git-like verbs: switch, worktree, branch, up, ls …)     │
-└───────────────┬──────────────────────────────────────────────────┘
-                │ local IPC (unix socket / gRPC)
-┌───────────────▼──────────────────────────────────────────────────┐
-│  gotd — host manager (daemon or on-demand)                         │
-│  • Ref↔Machine registry        • Port/hostname allocator           │
-│  • Lifecycle orchestrator      • Snapshot/quiesce coordinator      │
-│  • Git integration (hooks/wrap)• Reverse proxy (*.got.test)        │
-├───────────────┬───────────────────────────┬───────────────────────┤
-│ VmmDriver     │ StorageDriver             │ NetDriver              │
-│ (libkrun /    │ (APFS clonefile /         │ (gvproxy / vmnet /     │
-│  CH / FC /    │  reflink / ZFS / qcow2     │  user-net + port fwd)  │
-│  QEMU / VZ)   │  CoW overlays + volumes)   │                        │
-└───────────────┴───────────────────────────┴───────────────────────┘
-                │ virtio (blk, fs, net, vsock)
-┌───────────────▼──────────────────────────────────────────────────┐
-│  Guest microVM (per branch/worktree)                               │
-│  • gotd-agent (vsock/virtio-serial): start/stop svcs, health, exec │
-│  • Declared services from got.toml (postgres, redis, app, …)       │
-│  • Persistent data volume  +  code (virtio-fs share or in-disk)    │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  got CLI  (new / run / save / drop / doctor)  │
+├──────────────────────────────────────────────┤
+│  got-core  (registry, provenance, lifecycle)  │
+├──────────────────────────────────────────────┤
+│  got-vmm   (libkrun FFI, exec transport)      │
+│  got-store (SQLite registry, CoW clone,       │
+│             content-addressed snapshots)      │
+└──────────────────────────────────────────────┘
+                │ virtio (blk, net, vsock)
+┌───────────────▼──────────────────────────────┐
+│  Guest microVM per machine                    │
+│  • Content-addressed golden rootfs (RO)       │
+│  • Per-machine CoW overlay (RW)               │
+│  • Small static exec + quiesce agent          │
+└──────────────────────────────────────────────┘
 ```
 
-### 4.1 The core mapping
+### 4.1 No daemon
 
-`gotd` maintains a registry mapping each git ref (and worktree) to a **Machine**:
+`got` is a single binary. No `gotd`. No system service. Each invocation
+opens the SQLite registry, does the requested operation, and exits.
+Long-running guest VMs are owned by launchd / systemd user services or a
+detached child process, not by a `got` daemon.
 
-```
-Machine {
-  id, project_id, ref (branch), worktree_path,
-  base_image_ref,            // golden image this descends from
-  data_disk,                 // CoW overlay: durable branch state
-  snapshot,                  // optional saved memory+cpu state (Phase 3)
-  state: Cold|Running|Paused|Saved,
-  ports: { app: 51001, db: 51002, ... },
-  vmm_handle,                // opaque driver handle when live
-}
-```
+### 4.2 Registry
 
-Registry lives at `~/.got/registry.db` (SQLite) plus per-project metadata in
-`<repo>/.got/`.
+`~/.got/registry.db` (SQLite) records two tables.
 
-### 4.2 Components
-
-- **`got` CLI** — thin client; git-familiar verbs; talks to `gotd`.
-- **`gotd` (host manager)** — orchestrates lifecycle, storage, networking, git
-  integration. Can run as a launchd/systemd service or be spawned on demand.
-- **`VmmDriver`** — trait: `create/start/pause/resume/snapshot/restore/destroy`.
-  Impls: `libkrun` (default, **both** macOS *and* Linux), `cloud-hypervisor`,
-  `firecracker`, `qemu`, `apple-vz`. **Caveat — impedance mismatch:** libkrun is an
-  *in-process library*; CH/FC/QEMU are *child processes with REST/QMP APIs*; Apple VZ is
-  a *framework* with a Swift/ObjC surface. A single trait will leak around disk-attach,
-  net-config, and exec. We therefore **design the seam but build M1 against exactly one
-  concrete combo** (`libkrun` + `apfs clonefile` + `TSI`) and only extract the trait when
-  a second real driver forces its shape (§12).
-- **`StorageDriver`** — trait for CoW disks + volumes. Impls: `apfs` (clonefile),
-  `reflink` (btrfs/XFS), `zfs`, `qcow2` (portable backing-file fallback).
-- **`NetDriver`** — user-mode networking + port forwarding; local DNS/reverse proxy
-  for `*.got.test`. Impls: **libkrun TSI + `krun_set_port_map` (M1 default, no root/no
-  helper)**, then `gvproxy`/`vmnet` (macOS), `tap`+`slirp`/`passt` (Linux) for faithful
-  networking. (Domain is `.got.test`, an RFC 6761 dev TLD — **not** `.got.local`, because
-  macOS routes all `.local` names to mDNS/Bonjour and they never reach our resolver.)
-- **`gotd-agent`** — tiny static guest daemon over a host↔guest control channel:
-  starts/stops declared services, runs health checks, performs **quiesce**
-  (fsync/checkpoint DBs) before a snapshot, and provides an `exec` channel. **Transport
-  is an open M0 decision:** `vsock` (via `krun_add_vsock_port`, which on macOS is a
-  UNIX-socket proxy, not real `AF_VSOCK`) vs **virtio-serial** (what Microsandbox chose
-  on macOS). Spike both for reliability before committing.
-
-## 5. Storage & state model
-
-State persistence is the heart of `got`. Three layered artifacts per project:
-
-1. **Golden base image** — read-only. Built once from `got.toml` (OS + toolchain +
-   project deps + service binaries). Rebuilt when the recipe changes. Content-addressed.
-
-2. **Per-branch data disk (CoW overlay)** — writable copy-on-write layer on top of the
-   base. Holds everything that mutates: DB data directories, caches, uploads, build
-   artifacts, installed packages that aren't baked into the base. **This is what makes
-   "the migration stays with the branch" work.**
-
-3. **Optional memory snapshot** (Phase 3) — saved RAM+vCPU state for instant resume of
-   *running processes*.
-
-### 5.1 Copy-on-write strategy per platform
-
-- **macOS:** APFS `clonefile()` gives instant CoW clones of a disk image file. Forking
-  a branch's disk = one `clonefile` call. Zero-copy until write.
-- **Linux:** `reflink` (btrfs, XFS), **ZFS** clones, or **qcow2 backing files** as a
-  universal fallback that works on any filesystem.
-
-This makes `got branch` a near-instant metadata operation regardless of disk size,
-mirroring the "fork a machine as fast as it forks 1GB or 64GB" property the best cloud
-sandboxes advertise.
-
-**Clone ordering is not optional (correctness):** `clonefile()` clones the image file's
-*on-disk extents*, so a live, dirty guest disk would be cloned torn/stale. Any CoW clone
-(`got branch`/`fork`) must run: **(1)** guest quiesce (fsync + DB checkpoint via the
-agent) → **(2)** host-side flush of the image file (`F_FULLFSYNC`) → **(3)** `clonefile`.
-Prefer cloning from a `Saved`/stopped source.
-
-**Durability boundary (macOS relaxed fsync):** on macOS libkrun's `KRUN_SYNC_RELAXED`
-means a *guest* `fsync` flushes host OS buffers but does **not** force the physical drive
-to flush. So committed DB writes survive a `got switch` (host page cache persists) but
-are **not** guaranteed to survive host power-loss unless we select full-sync for that
-volume. `got`'s durability contract is "survives switch," not "survives power-loss,"
-unless a volume opts into `sync_mode=full` (see open questions).
-
-### 5.2 Code: two mount models (configurable)
-
-- **Model A — shared source (default):** the working tree lives on the host and is
-  mounted into the VM via **virtio-fs**. The host editor/IDE sees files directly; git
-  runs on the host. Only *runtime* state (DB/deps/artifacts) lives on the VM data disk.
-  Simplest editor story; some virtio-fs perf caveats for huge trees.
-  - **Unresolved composition problem:** "installed deps persist per branch" (the headline
-    promise) conflicts with sharing the working tree from the host. `node_modules`,
-    `.venv`, and build caches normally live *inside* the tree — if that tree is shared
-    read/write via virtio-fs, those deps are shared across branches, not per-branch. Model
-    A therefore needs an explicit rule for **which subtrees are runtime state
-    (bind/overlaid from the per-branch data disk) vs source (virtio-fs)**. This must be
-    specified before `got up` (see §12/M1 and open questions).
-  - **Parallelism caveat:** a single repo checkout is one working tree, so Model-A branch
-    *switching* is inherently serial (one tree ⇒ one active VM). True simultaneous VMs
-    (goal #4, the "three agents at once" story) come from **worktrees**, not single-dir
-    switching.
-- **Model B — enclosed (max isolation):** the repo lives entirely inside the VM disk.
-  Best for untrusted/parallel agents. Host access via SSH/vsock + remote-dev or a
-  file-sync bridge. Chosen automatically for `got worktree add --isolated`. **Also the
-  only model compatible with Phase-3 memory snapshots** (virtio-fs cannot be
-  memory-snapshotted — see §12/M3).
-
-### 5.3 Volumes
-
-`got.toml` can declare named **volumes** (e.g. the Postgres data dir) that are pinned
-to the branch data disk and explicitly quiesced before snapshot. Volumes can be marked
-`shared` (persist across branches — e.g. a package download cache) or `per-branch`
-(default — isolated).
-
-**Two constraints inherited from the block-device model:** (1) a `shared` writable
-volume must be **single-writer** — mounting one writable block device into two live
-guests at once risks filesystem corruption (this is how Microsandbox's volumes behave
-too); `shared` therefore means "reattached serially / read-mostly," not "concurrently
-read-write." (2) Cloning a raw ext4 image duplicates its **filesystem UUID**; this is
-harmless while each clone lives in its own guest kernel, but breaks if we ever mount a
-clone **host-side** (for inspection) or into a second guest alongside the original —
-generate a fresh UUID in those cases.
-
-## 6. Lifecycle & the switch operation
-
-The defining operation is `got switch <ref>`. Sequence:
+**Machines** (live runtime handles):
 
 ```
-switch(target):
-  cur = active_machine_for_current_ref()
-
-  # Pre-flight the git op BEFORE touching the current VM, so a dirty/blocked
-  # tree fails fast and leaves the running machine untouched.
-  if not git_switch_would_succeed(target):     # uncommitted/conflicting changes?
-      abort_or_prompt_stash(target)            # mirror `git switch` semantics; no VM change
-
-  if cur:
-    agent.quiesce(cur)            # fsync, checkpoint DBs, flush caches
-    if driver.supports_mem_snapshot:
-        driver.pause(cur); driver.snapshot(cur)     # Phase 3: keep processes
-    else:
-        agent.stop_services(cur); driver.stop(cur)  # Phase 1: disk persists
-    mark(cur, Saved|Cold)
-
-  try:
-      git_switch(target)         # or worktree hop; update working tree
-  except GitError:
-      resume(cur)                # ROLLBACK: restart the machine we just stopped
-      raise
-
-  tgt = registry.get(target) or provision(target)   # CoW-clone base/parent (quiesce+flush+clonefile, §5.1)
-  ports = allocator.assign(tgt)                      # stable per-branch ports
-  if tgt.snapshot and driver.supports_restore:
-      driver.restore(tgt.snapshot)                   # instant, live processes
-  else:
-      driver.start(tgt); agent.start_services(tgt)   # boot + start declared svcs
-  proxy.route("<ref>.got.test" -> tgt.ports.app)
-  mark(tgt, Running)
+machines(handle, base_commit, recipe_hash, parent_machine,
+         base_image_path, overlay_path, lifecycle, created_at)
 ```
 
-Guarantees:
-- **Safety:** always quiesce before saving; never lose committed DB writes. Any CoW
-  clone follows the quiesce → host-flush → `clonefile` ordering from §5.1.
-- **Atomicity:** the git op is pre-flighted and, if it fails after we've stopped the
-  source VM, we **roll back** by resuming the source — never leave the user with no
-  running machine and a half-switched tree.
-- **Dirty-tree handling:** `got switch` mirrors `git switch` (refuse on conflict, or
-  wrap `stash`); this is *why* the wrapper is primary over hooks (§8).
-- **Determinism:** ports and hostnames are stable per ref across switches.
-- **Speed target:** Phase 1 ≤ a few seconds (boot + service start). Phase 3 sub-second
-  (memory restore).
+- `handle` — user-chosen label. Ref-shaped by default. Unique per project.
+- `lifecycle` — `sealed` (quiesced, fork-safe O(1)) or `live` (mutating).
+- `parent_machine` — the machine this was CoW-forked from, or null for root
+  machines forked directly from a base image.
 
-Other lifecycle verbs: `up` (provision+start current ref), `down`/`sleep`
-(quiesce+stop, keep disk), `reset --hard` (discard data disk, re-clone base),
-`branch`/`fork` (**quiesce source → host-flush → CoW clone** current machine to a new
-ref, per §5.1), `rm` (destroy machine + disk), `gc` (prune orphaned/dead-branch
-machines).
+**Snapshots** (immutable saved states, indexed by handle + git SHA):
 
-### 6.1 Idle & resource management
+```
+snapshots(snapshot_id, handle, head_sha, snapshot_path,
+          content_hash, saved_at)
+```
 
-- Auto-sleep VMs after configurable idle (default e.g. 5 min): quiesce + stop, freeing
-  CPU/RAM; disk state stays. Resume on next access.
-- Global caps: max concurrent running VMs, per-VM vCPU/RAM defaults (e.g. 2 vCPU /
-  2–4 GiB), overridable in `got.toml`. Prevents a laptop meltdown when many branches
-  exist — most are `Saved`, only the working set is `Running`.
+- `snapshot_id` — short unique ID (e.g. `s_a1f3`).
+- `handle` — the machine handle at save time.
+- `head_sha` — the git HEAD of the ref the handle shadowed at save time.
+  Null if the handle was `--detached`.
+- `snapshot_path` — points to `~/.got/snapshots/<content_hash>`.
+- `content_hash` — hash of overlay bytes. Two snapshots with identical
+  content share the file (dedup).
 
-## 7. Networking & port model
+There is no `Machine` type in the public surface. There is only the handle
+and, optionally, saved snapshots keyed by SHA. `sealed`/`live` and
+`named`/`--detached` are metadata bits, not separate nouns. A "branch
+machine" is a machine with a named handle held against a git ref. An
+"attempt machine" is a machine with `--detached` and a short lease. Same
+noun.
 
-Problem: parallel VMs must not collide on ports, and users must reach services easily.
+### 4.3 Internal driver seam (not public)
 
-- **User-mode networking** per VM (no root, no bridge headaches). **M1 uses libkrun's
-  built-in TSI** (Transparent Socket Impersonation) + `krun_set_port_map` — it exposes
-  guest listening ports on host localhost with **no helper process and no root**, which
-  is exactly what the reverse proxy needs. `gvproxy`/`vmnet` (macOS) and `passt`/`slirp`
-  (Linux) are **later** NetDriver options for apps that need faithful networking, because
-  **TSI has limits**: TCP/UDP over AF_INET/INET6 only (no raw/ICMP sockets), no inbound
-  UDP-listen from the guest, and it requires the custom libkrunfw kernel. (Note: with
-  `passt`, `krun_set_port_map` returns `-ENOTSUP` — port mapping moves to passt's CLI.)
-- **Deterministic port allocation:** each (ref, service) gets a stable host port from a
-  managed range (e.g. 51000+). `got ls` shows the map. **Caveat:** 51000+ overlaps the OS
-  ephemeral range (macOS 49152–65535), so leases can race OS-assigned ports; allocate
-  with bind-failure retry and record leases rather than assuming the range is free.
-- **Local reverse proxy + DNS:** `gotd` runs a proxy resolving `<ref>.got.test` (and
-  `<service>.<ref>.got.test`) to the right VM/port. So `billing.got.test:3000`
-  always hits the billing branch's app, regardless of which VMs are up. We use
-  **`.got.test`** (RFC 6761 reserved for testing), resolved via an `/etc/resolver/got.test`
-  file pointing at `gotd`'s local DNS. **We must not use `.got.local`:** macOS sends every
-  `.local` name to mDNSResponder/Bonjour and `/etc/resolver` overrides are ignored for it,
-  so those names would never reach our proxy.
-- **Egress policy (later):** optional per-VM allow/deny lists for network egress
-  (valuable for untrusted agents), following the policy-proxy pattern common in the
-  sandbox ecosystem.
+Backend abstraction lives in the `got-vmm` crate as a trait with exactly
+one implementation in v1 (libkrun). The trait exists so that adding
+Firecracker / Cloud Hypervisor / Apple VZ in v2+ (for memory snapshots) is
+a compile-time swap, not a rewrite. The trait is internal — it does not
+appear in the CLI, in `got.toml`, or in any user-visible error message.
+
+## 5. Storage & state
+
+Three artifacts per project:
+
+1. **Golden base image** — content-addressed and read-only. Content hash =
+   `hash(base_image_ref + got.toml + lockfiles)`. Built once per hash;
+   cached under `~/.got/images/<hash>`. If two projects share a hash, they
+   share the base.
+2. **Per-machine CoW overlay** — writable. Holds everything that mutates:
+   DB data directories, caches, installed packages, uploads, artifacts.
+3. **Immutable snapshots** — CoW clones of an overlay at save time, keyed
+   by content hash under `~/.got/snapshots/<content_hash>`, indexed in the
+   registry by `(handle, head_sha)`.
+
+Provenance is recorded in the registry at creation:
+`(base_commit, recipe_hash, parent_machine)`. This is what makes a machine
+reproducible and inspectable without a separate "ledger" product.
+
+### 5.1 Copy-on-write per platform
+
+- **macOS:** APFS `clonefile()` gives instant CoW clones of the overlay
+  file. Forking a machine — or saving a snapshot — is one `clonefile` call.
+  Zero-copy until write.
+- **Linux:** `reflink` (btrfs, XFS), ZFS clones, or qcow2 backing files as
+  a universal fallback.
+
+**Clone ordering (correctness).** Any CoW clone (both `got new … from
+<name>` and `got save <name>`) must run **quiesce → host-flush
+(`F_FULLFSYNC`) → `clonefile`**, in that order. Cloning from a `sealed`
+machine skips the quiesce step (already quiesced). Cloning from `live`
+requires an in-guest sync + host flush first, or fails with a clear error.
+
+**Durability boundary.** libkrun's `KRUN_SYNC_RELAXED` means a guest
+`fsync` reaches the host page cache but not the physical drive. Contract
+is "survives switch," not "survives host power-loss." A per-machine
+`sync_mode=full` opt-in exists for volumes that need it. `got save` uses
+full sync regardless of the machine's default mode — snapshots must
+survive power loss even if the live overlay does not.
+
+### 5.2 Model B is the v1 default
+
+The working tree lives inside the machine's overlay. Code, deps, and DB
+state — one CoW disk. No virtio-fs host-share. This is the only model
+that:
+- preserves working-tree CoW when you fan out six machines on a 2 GB
+  monorepo (the failure mode of wrapping `git worktree add`);
+- keeps machine-level isolation for autonomous agents;
+- lets you fork or save a machine sub-second regardless of tree size.
+
+Model A (shared host source via virtio-fs with per-ecosystem overlay
+recipes for `node_modules`, `.venv`, build caches) is deferred to M2. It is
+an opt-in adapter for humans who want editor visibility on the host, not
+the default.
+
+### 5.3 Snapshots (`got save`)
+
+A snapshot is an immutable CoW clone of a machine's overlay, saved to
+`~/.got/snapshots/<content_hash>` and recorded in the `snapshots` table
+with `(handle, head_sha, snapshot_hash, saved_at)`.
+
+- **Association.** `head_sha` is the current git HEAD of the ref the
+  handle shadows at save time. Null if the handle is `--detached`.
+- **Content addressing.** Two saves that produce byte-identical overlays
+  share the same file on disk. Most commits move little runtime state, so
+  dedup is effective in practice.
+- **Idempotence.** If the latest snapshot for `(handle, head_sha)` already
+  matches the current content hash, `got save` is a no-op and returns the
+  existing snapshot ID.
+- **Snapshot-aware `got new`.** On an existing handle, `got new <name>`
+  first looks up `snapshots WHERE handle = <name> AND head_sha =
+  git_current_head(shadowed_ref)`. If found, restore from that snapshot
+  (the snapshot is CoW-cloned into a new live overlay). If not found, boot
+  the current live overlay.
+- **Storage GC.** V1 keeps all named-handle snapshots. Content-addressing
+  and CoW keep the marginal cost low. A retention policy (last N per
+  handle, or expire-after-M-days for detached handles) is a v2 concern
+  driven by real usage data.
+
+## 6. Lifecycle
+
+The four verbs. Nothing else.
+
+### 6.1 `got new <name> [from <src>] [--detached]`
+
+```
+new(name, source):
+  if not name and not --detached: error
+  if name in registry:                          # idempotent
+      shadowed_ref = git_ref_for(name)
+      snap = latest_snapshot(name, shadowed_ref.head_sha)
+      if snap:
+          overlay = cow_clone(snap.snapshot_path) # restore from saved state
+      else:
+          return handle(name)                    # existing live overlay
+  base = resolve(source)                        # ref | commit | snapshot | machine
+  provenance = (base_commit, recipe_hash, parent_machine)
+  overlay = cow_clone(base_overlay)             # quiesce → flush → clonefile
+  handle = new_handle(name or auto_id, provenance, overlay, lifecycle=live)
+  registry.write(handle)
+  vmm.start(handle)                             # libkrun boot, TSI ports assigned
+  return handle
+```
+
+- `<src>` may be a ref (`feat/x`), a commit SHA, a snapshot ID (`s_a1f3`),
+  an existing machine handle, or `HEAD`. Default is the current project's
+  default base image plus `HEAD`.
+- **Snapshot restore.** If `<src>` is a commit SHA and a snapshot exists
+  for `(handle_being_created_or_shadowed_ref, commit_sha)`, restore from
+  it. This is what makes `git checkout <old-sha>` + `got new feat/x` work.
+- **Naming.** `feat/x` **shadows** the ref `refs/heads/feat/x` — attaches
+  the handle to whatever HEAD points at now, records `base_commit` at that
+  SHA, but does not create or modify any git ref.
+- `--detached` yields an auto-generated handle (`m_a1f3…`), no ref
+  shadowing, short auto-GC lease.
+
+### 6.2 `got run <name> -- <cmd>`
+
+Executes `<cmd>` inside the machine's guest. Captures stdout, stderr, and
+exit code. Long-running services persist between invocations (`docker exec`
+semantics). Interactive TTY via `got run --tty <name> -- $SHELL` in M2.
+This one verb subsumes `exec`, `ssh`, `logs`, and `doctor`. Idempotent
+from the caller's point of view: each invocation is a fresh process
+against the same machine.
+
+### 6.3 `got save [<name>]`
+
+```
+save(name):
+  machine = registry.get(name)                   # or all live machines if none
+  agent.quiesce(machine)                         # guest sync + DB checkpoint
+  host.fullfsync(machine.overlay_path)           # F_FULLFSYNC
+  content_hash = hash_file(machine.overlay_path)
+  head_sha = git_current_head(machine.shadowed_ref) or null
+  existing = registry.find_snapshot(name, head_sha)
+  if existing and existing.content_hash == content_hash:
+      return existing.snapshot_id                # no-op, dedup
+  snapshot_path = cow_clone(machine.overlay_path,
+                            f"~/.got/snapshots/{content_hash}")
+  snapshot_id = registry.write_snapshot(name, head_sha,
+                                        snapshot_path, content_hash)
+  return snapshot_id
+```
+
+- **Quiesce.** The guest exec agent runs `sync` plus any registered
+  DB-checkpoint hooks (Postgres `CHECKPOINT`, SQLite
+  `PRAGMA wal_checkpoint(TRUNCATE)`, Redis `BGSAVE + LASTSAVE`) before the
+  host clones. Full-sync mode is used regardless of the machine's default
+  `sync_mode` — snapshots must be power-loss-durable.
+- **Association.** If `<name>` shadows a git ref (default), `head_sha` is
+  the current HEAD of that ref. If `<name>` is `--detached`, `head_sha`
+  is null; the snapshot is retrievable only by its ID.
+- **Idempotence.** If the latest snapshot for `(handle, head_sha)` has a
+  matching content hash, no-op and return the existing snapshot ID.
+- **No `<name>`.** Saves every live machine. Useful in a `post-commit`
+  shell alias the user chooses to write themselves. `got` does not
+  install git hooks.
+- **Interaction with `got new`.** After `got save feat/x`, if the user
+  runs `git checkout <old-sha>` and then `got new feat/x`, the machine
+  reboots from the snapshot saved for `(feat/x, old-sha)`. If no such
+  snapshot exists, the current live overlay is used.
+
+This is `git commit` for the runtime.
+
+### 6.4 `got drop <name>`
+
+Quiesces the machine, stops the VMM, deletes the **live overlay**,
+removes the handle from the `machines` table. **Saved snapshots survive
+by default** — they remain in the `snapshots` table and can be restored
+by a future `got new <name>` if the handle name is reused against a
+matching git SHA.
+
+- `--force` — kill even if the machine is live and cannot be quiesced.
+- `--snapshots` — also delete all saved snapshots for this handle.
+- Idempotent.
+
+### 6.5 `got doctor`
+
+Diagnostic-only. Checks HVF entitlements on the binary, `libkrunfw`
+presence, APFS on the store path, `clonefile` support, base image cache,
+snapshot cache integrity. Modifies nothing.
+
+## 7. Networking
+
+- **User-mode networking per machine via TSI + `krun_set_port_map`.** No
+  root, no helper process, no bridge. Each machine's listening ports are
+  exposed on host localhost at a stable, project-scoped port allocated
+  from a managed range.
+- **Deterministic per-handle port allocation.** `got ls` shows the map.
+  Handle collision within the allocated range triggers bind-failure retry,
+  not a lease crash.
+- **No reverse proxy. No `*.got.test` DNS.** Machines expose
+  `localhost:<port>`. Routing between them is the caller's job. This
+  removes the `/etc/resolver/*` install friction and keeps `got doctor`
+  from having to manage privileged config.
 
 ## 8. Git integration
 
-Two complementary mechanisms:
+`got` never runs git. Git never runs `got`. They are orthogonal.
 
-1. **Wrapper verbs (primary):** `got switch/checkout/worktree/branch/stash` wrap the
-   corresponding git commands and attach machine lifecycle. This is the intended daily
-   driver and gives us full control over ordering (quiesce before checkout, etc.).
-2. **Hooks (assistive):** installed `post-checkout`, `post-merge`, `post-worktree`
-   hooks let plain `git` usage still trigger `gotd` reconciliation, so `got` degrades
-   gracefully when users forget to use the wrapper. **Hard limit:** `post-checkout` fires
-   *after* the working tree has already changed, so hooks **cannot quiesce the old
-   branch's DB before the switch** — they can guarantee reconciliation but **not** the
-   safety invariant. Under bare `git`, treat the prior machine's state as
-   crash-consistent, not cleanly quiesced. This is the core reason the wrapper is primary.
+- **Handle shadowing.** `got new feat/x` records the resolved commit at
+  creation, but does not create, modify, or delete `refs/heads/feat/x`.
+- **Save.** `got save feat/x` reads `refs/heads/feat/x` HEAD but does not
+  write to it. No `post-commit` hook is installed; users who want
+  automatic save write their own alias (`gitcommit() { git commit "$@" &&
+  got save; }`).
+- **Promotion.** `git merge <ref>` — the machine follows the promoted ref
+  because the handle shadows it, and any snapshot saved for the merge
+  commit is restorable.
+- **Rollback.** `got drop <name>` for runtime + `git reset` for code;
+  snapshots for old SHAs remain and can be restored.
+- **Fanout.** `for i in {1..6}; do got new --detached from HEAD; done` —
+  no refs polluted.
 
-Worktree strategy: `got worktree add <ref>` creates a git worktree *and* a dedicated
-machine (defaulting to `--isolated`/Model B for agent safety). Each worktree ↔ machine
-is fully independent, solving parallel-agent interference.
+**No default hooks. No wrappers. No `got switch`. No `got worktree`.** If a
+user runs `git worktree add`, they created a worktree; they can `got new`
+against it or not. `got` does not know or care.
 
-Mapping storage: `<repo>/.got/config.toml` (project settings, image recipe ref) and
-`~/.got/registry.db` (global ref→machine index, port leases, snapshots).
+### 8.1 Opt-in hooks (`got hook install`)
+
+Users who want git-triggered auto-follow install hooks via a single admin
+command. This is explicit user consent, not orthogonality violation — got
+itself never runs git and never installs hooks; git only invokes got via
+scripts the user chose to place.
+
+**Admin commands:**
+
+- **`got hook install [--force] [--append]`** — writes hook scripts into
+  `.git/hooks/`. Refuses to overwrite non-got hooks unless `--force`; use
+  `--append` to preserve existing script content and add got-owned lines
+  below a sentinel comment (removable by `got hook uninstall`). Detects
+  `husky` / `pre-commit` / `lefthook` hook-manager setups and prints
+  integration instructions instead of installing directly.
+- **`got hook uninstall`** — removes got-owned hook content. Preserves any
+  non-got content added via `--append` mode.
+- **`got hook status`** — prints which hooks are installed, which are
+  missing, and which conflict with other tools.
+
+**Hooks installed:**
+
+- **`post-checkout`** — after `git checkout <branch>`, `git switch`, or
+  `git checkout -b`, runs `got save <outgoing-branch>` (if that machine
+  exists), then `got new <incoming-branch>` (which restores the snapshot
+  matching the incoming HEAD or boots the current live overlay).
+- **`post-commit`** — after `git commit`, runs `got save <current-branch>`,
+  tagging the snapshot with the new HEAD SHA. This is what makes
+  `git checkout <old-sha>` + `got new <name>` restore the exact runtime
+  that matched that commit.
+- **`post-merge`** — after `git merge` or a merge-based `git pull`, runs
+  `got save <current-branch>` followed by `got new <current-branch>` to
+  refresh runtime against the merged state.
+- **`post-worktree`** (git 2.44+ only) — after `git worktree add`, runs
+  `got new <ref>` in the new worktree's directory.
+
+**Semantics:**
+
+- All hook actions are **fail-silent**: `got` errors never break `git`.
+- Every hook invocation appends to `~/.got/hooks.log` for debugging.
+- Detached HEAD, missing machines, and machines whose handle does not
+  match any branch are all no-ops.
+- The primitive is complete without hooks. Installation is an explicit
+  user action; `got init` and `got new` do not touch git hooks.
+
+**Known gaps (documented, not fixed):**
+
+- `git reset --hard`, `git rebase`, and `git cherry-pick` move HEAD
+  without firing `post-checkout`. Snapshot-per-commit time-travel still
+  works for previously-saved SHAs, but the live overlay does not
+  auto-refresh. Users who need this run `got new <branch>` manually.
+- Squash-merge and fast-forward pull edge cases in `post-merge` may
+  double-save. Idempotent snapshot dedup makes this cheap in practice.
 
 ## 9. Configuration: `got.toml`
 
-Committed to the repo; defines the reproducible environment (golden image + services).
+Optional. Committed to the repo if used. Records the base image reference
+and the recipe inputs whose hash becomes the golden-image identity. Nothing
+else.
 
 ```toml
 [project]
 name = "acme"
-base = "debian:12"            # or a Dockerfile/OCI image; got builds the golden image
-mount = "shared"             # shared (virtio-fs) | enclosed (in-disk)
+base = "debian:12"          # OCI reference or Dockerfile path
+
+[recipe]
+lockfiles = ["package-lock.json", "poetry.lock"]
 
 [resources]
 cpus = 2
 memory = "4GiB"
 
-[build]                       # baked into the read-only golden image
-run = [
-  "apt-get update && apt-get install -y postgresql redis-server nodejs",
-  "npm ci",
+[quiesce]                   # optional: extra commands the guest agent runs
+                            # during `got save`, before host flush
+commands = [
+  "pg_ctl -D /var/lib/postgresql/16/main checkpoint",
+  "redis-cli BGSAVE",
 ]
-
-[[services]]                  # started by gotd-agent on VM start
-name = "postgres"
-command = "pg_ctlcluster 16 main start"
-volume = "pgdata"            # persisted on the per-branch data disk
-health = "pg_isready"
-port = 5432
-
-[[services]]
-name = "app"
-command = "npm run dev"
-port = 3000
-depends_on = ["postgres"]
-
-[[volumes]]
-name = "pgdata"
-scope = "per-branch"         # per-branch (default) | shared
-
-[snapshot]
-mode = "disk"               # disk (Phase 1) | memory (Phase 3, driver-dependent)
-quiesce = ["postgres"]      # services to checkpoint/flush before saving
 ```
 
-## 10. CLI surface (initial)
+No `[[services]]`. No `depends_on`. No `health`. No `[[volumes]]`. No
+`[snapshot]` config beyond `[quiesce]`. The recipe hash is
+`hash(base + recipe.lockfiles content + resource block)`. If two developers
+have the same `got.toml` and the same lockfile contents, they get the same
+golden image, byte-for-byte.
+
+## 10. CLI surface
+
+Five commands (four verbs plus `doctor`; `ls` is a read-only listing).
+
+Primitive verbs (compose):
 
 ```
-got init                     # scaffold got.toml, build golden image
-got up                       # provision + start machine for current ref
-got switch <ref>             # the core op: save current, restore/boot target
-got checkout <ref>           # alias mirroring git
-got branch <new> [from]      # git branch + CoW-clone the machine
-got worktree add <ref>       # new worktree + isolated machine
-got ls                       # list refs, machine state, ports, uptime
-got status                   # current ref's machine + services health
-got sleep | down             # quiesce + stop (keep disk)
-got reset --hard             # discard data disk; re-clone from golden image
-got rm <ref>                 # destroy machine + disk
-got exec <ref> -- <cmd>      # run a command inside a machine (agent exec channel)
-got ssh <ref>                # shell into a machine
-got logs <ref> [service]     # stream service logs
-got gc                       # prune orphaned machines/snapshots
-got doctor                   # check host prerequisites (HVF/KVM, FS CoW, tools)
+got new <name> [from <src>] [--detached]      # create machine (restore snapshot if available)
+got run <name> -- <cmd>                       # exec inside machine
+got save [<name>]                             # snapshot state, tag with current HEAD SHA
+got drop <name> [--force] [--snapshots]       # destroy machine (snapshots survive by default)
 ```
+
+Admin (do not compose; parallel to `docker system prune`, `git config`):
+
+```
+got doctor                                    # diagnostic check
+got ls                                        # list handles and their snapshots
+got hook install [--force] [--append]         # opt-in: install git hooks (§8.1)
+got hook uninstall                            # remove got-owned hook content
+got hook status                               # show hook installation state
+```
+
+`got ls`, `got doctor`, and `got hook *` are administrative — they do not
+compose with the primitive verbs and do not count against the four-verb
+ceiling. Every user-facing operation on machine state goes through `new`,
+`run`, `save`, `drop`, and git.
 
 ## 11. Technology stack
 
-- **Language:** **Rust** for CLI, `gotd`, and drivers. strong FS, async, and packaging
-  story. FC/CH are Rust; libkrun is a C library.
-- **libkrun binding:** FFI to the **upstream C ABI**, pinned to **`stable-1.19.x`** (not
-  `main`/2.0, which is ABI-unstable). Disk attach via `krun_add_disk2/3` (**not** the
-  deprecated `krun_set_root_disk`/`krun_set_data_disk`); confirm build flags at runtime
-  with `krun_has_feature(BLK/NET)`. We do **not** use Microsandbox's `msb_krun` Rust fork
-  (see §3.3).
-- **Guest kernel:** vendor/ship **`libkrunfw`** (the firmware bundle libkrun boots); TSI
-  networking depends on it.
-- **macOS packaging:** the `got` binary is **codesigned with `com.apple.security.hypervisor`
-  + `com.apple.security.cs.disable-library-validation`** and **dynamically links**
-  `libkrun.dylib` (LGPL-2.1). So "single binary" but **not** fully static on macOS. No
-  root to run VMs.
-- **Guest agent:** Rust, static (musl) → one small binary baked into the golden image.
-- **Host IPC:** unix socket + gRPC or JSON-RPC (`tonic`/`prost` or a lightweight
-  framing). Guest↔host over **vsock or virtio-serial** (decide in M0, §4.2).
-- **Datastore:** SQLite (`rusqlite`) for the registry/port leases.
-- **Image build:** accept a Dockerfile/OCI image and convert to a bootable rootfs for
-  libkrun, porting Microsandbox's concrete design (EROFS layers + VMDK flat descriptor as
-  a read-only virtio-blk root + writable ext4 upper + in-guest overlayfs, §3.3). **Note
-  the bootstrap:** `[build] run = [...]` executes *Linux* commands, so `got init` must
-  boot a build microVM to run them (docker-build semantics on our own VMM) or shell out
-  to an external OCI builder — decide in M0 (open question).
-- **Networking:** libkrun **TSI + `krun_set_port_map`** (M1); `gvproxy`/`vmnet` (macOS),
-  `passt` (Linux) later for faithful networking.
+- **Language.** Rust. Cargo workspace: `crates/got-cli`, `crates/got-core`,
+  `crates/got-vmm`, `crates/got-store`.
+- **libkrun binding.** FFI to the upstream C ABI, pinned to `stable-1.19.x`.
+  Disk via `krun_add_disk2/3`. Runtime feature check via
+  `krun_has_feature`. No `msb_krun` fork.
+- **Guest kernel.** Vendor and ship `libkrunfw`.
+- **macOS packaging.** Binary codesigned with `com.apple.security.hypervisor`
+  + `com.apple.security.cs.disable-library-validation`. Dynamically links
+  `libkrun.dylib` (LGPL-2.1). No root.
+- **Guest exec + quiesce agent.** Small static Rust binary baked into the
+  golden image. Handles both command execution (for `got run`) and quiesce
+  orchestration (for `got save`). Transport (vsock vs virtio-serial)
+  decided in M0.
+- **Registry.** SQLite via `rusqlite`. Two tables: `machines`, `snapshots`.
+- **Snapshot store.** Content-addressed directory
+  `~/.got/snapshots/<content_hash>`. CoW clones via `clonefile`/reflink.
+- **Image build.** Accept an OCI reference or a Dockerfile; convert to a
+  bootable rootfs. Port Microsandbox's EROFS + VMDK + ext4-overlay design.
+  Build orchestration decision (external OCI builder vs a `got`-owned build
+  microVM) is an M0 fork.
 
 ## 12. Phased roadmap
 
-**M0 — Spikes / de-risking (1–2 wks; note this scope is on the ambitious side)**
-- Prototype **direct libkrun** boot (FFI to the **`stable-1.19.x` C ABI**) on macOS
-  Apple Silicon (HVF) and Linux (KVM): boot a Debian rootfs, attach a **`krun_add_disk2`**
-  virtio-blk data disk, virtio-fs a host dir. **Codesign the spike binary**
-  (`com.apple.security.hypervisor` + disable-library-validation) and confirm it runs
-  unprivileged. (Backend decided in §3.3; this validates the path against the pinned ABI.)
-- **Agent transport bake-off:** exec over **vsock vs virtio-serial**; pick the winner.
-- **Rootfs decision:** port Microsandbox's **OCI → EROFS+VMDK+ext4-overlay** conversion
-  vs a simpler single-ext4 root; decide here, don't defer.
-- **Networking:** confirm **TSI + `krun_set_port_map`** exposes a guest TCP port on host
-  localhost with no root/helper.
-- Validate the **quiesce → host-flush (`F_FULLFSYNC`) → `clonefile`** ordering produces
-  an independently-writable branch disk both VMs can boot (and Linux reflink/qcow2).
-- **Golden-image build bootstrap:** decide external OCI builder vs a `got`-owned build
-  microVM for `[build] run` steps.
-- Output: a throwaway demo that boots two isolated VMs on distinct ports.
+### M0 — Spike (4–6 wk)
 
-**M1 — Core lifecycle, disk-state persistence (MVP)**
-- **One concrete stack, no premature traits:** `libkrun` + `apfs clonefile` + `TSI`.
-  Keep the driver seams as thin internal boundaries; extract `VmmDriver`/`StorageDriver`/
-  `NetDriver` traits only when a second driver forces their shape (§4.2).
-- `gotd` registry, port allocator (with ephemeral-range collision handling), `got
-  init/up/switch/ls/down/rm`.
-- `gotd-agent`: start/stop declared services, health, quiesce (fsync/checkpoint).
-- `got.toml` parsing + golden-image build (from Dockerfile/base).
-- **Resolve the Model-A runtime-vs-source composition rule** (which subtrees —
-  `node_modules`, `.venv`, caches — are overlaid from the data disk) *before* `got up`,
-  or default new projects to Model B until it's solved.
-- **Delivers the headline value:** migrations/DB/deps persist per branch via CoW disk;
-  parallel worktrees on isolated ports. *(No memory snapshots yet.)*
+Prove the primitive is buildable, not build it.
 
-**M2 — Fork, reset, DX polish**
-- `got branch/worktree add` with CoW machine cloning (quiesce→flush→clone); `reset
-  --hard`; `gc`.
-- Reverse proxy + `*.got.test` DNS (`/etc/resolver/got.test`); `got exec/ssh/logs`;
-  `got doctor` (checks HVF/KVM, codesign entitlements, FS CoW, resolver, tools).
-- Auto-sleep/idle management; resource caps; graceful multi-VM handling.
+- Direct libkrun FFI boot of a Debian rootfs on macOS Apple Silicon and
+  Linux. Codesign the spike binary. Confirm unprivileged run.
+- CoW clone timing: `clonefile` on a 2 GB and a 20 GB overlay image.
+  Target: sub-500 ms.
+- Agent transport bake-off: vsock (UNIX-socket proxy) vs virtio-serial for
+  the exec + quiesce channel.
+- OCI → bootable rootfs conversion decision: port Microsandbox's design vs
+  shell to an external builder.
+- End-to-end `got new HEAD --detached` on a codesigned macOS binary,
+  unprivileged, in one command.
+- **Snapshot spike:** validate quiesce → `F_FULLFSYNC` → `clonefile` +
+  content-hash storage produces a byte-stable, restorable overlay.
 
-**M3 — Memory snapshots (instant live resume)**
-- Add snapshot/restore to the driver interface; implement via **Cloud Hypervisor/
-  Firecracker on Linux** and **Apple VZ on macOS** (alternate drivers). **Not libkrun** —
-  its snapshot support is an unmerged, design-contested prototype with no committed
-  timeline (§3.4); don't plan around it.
-- **Coupling to surface, not fight:** memory snapshots require **Model B (in-disk)** — a
-  virtio-fs-shared source cannot be memory-snapshotted, and FC/CH don't do virtio-fs at
-  all. M3 effectively targets enclosed machines only.
-- Coordinated quiesce for consistent memory+disk snapshots (memory snapshot + CoW disk
-  clone taken at the same quiesced instant).
+**Definition of done:** a throwaway binary that creates a machine from a
+real image, runs a command inside it, saves a snapshot associated with a
+git SHA, restores that snapshot into a new machine, and drops both — with
+provenance recorded and zero `libkrun`/`HVF`/`krunfw` strings in stdout,
+stderr, or usage output.
 
-**M4 — Sharing & remote (v-future)**
-- Export/import a machine alongside a git push/pull. **Portability limit:** the **disk**
-  (raw/qcow2) is portable; a **memory+vCPU snapshot is driver- and host-CPU-specific**
-  and won't restore on a different VMM/microarchitecture. "Share a running system" is
-  realistically disk-state + re-boot, not cross-host live restore — scope the vision's
-  time-travel/north-star claim accordingly.
-- Remote host backend (run branch-machines on a Linux server via Firecracker/CH).
-- Egress policy proxy; agent-fleet ergonomics; optional MCP server so agents manage
-  their own branch-machines.
+### M1 — Ship the primitive (macOS Apple Silicon only)
 
-## 13. Key risks & mitigations
+`got new` / `run` / `save` / `drop` / `doctor`. Model B only. libkrun only.
+
+- SQLite registry schema per §4.2 (both tables).
+- Content-addressed image cache.
+- Provenance recording at `new`.
+- Idempotent `new` with snapshot restore for current HEAD SHA.
+- Handle shadowing of git refs (no ref modification).
+- CoW clone with quiesce → flush → clonefile ordering.
+- **`got save` with content-addressed snapshot storage, dedup, and
+  idempotence.** Guest quiesce agent supports `sync`, Postgres checkpoint,
+  SQLite WAL checkpoint, custom `[quiesce] commands` from `got.toml`.
+- **`got hook install/uninstall/status`** — opt-in `post-checkout`,
+  `post-commit`, `post-merge`, and `post-worktree` (git 2.44+) hooks
+  that auto-save the outgoing branch and auto-restore the incoming
+  branch. Fail-silent; reversible; detects `husky`/`pre-commit`/`lefthook`
+  and prints integration instructions instead of clobbering.
+- TSI port allocation with bind-failure retry.
+- `got doctor` diagnostic-only.
+
+**Not in M1:** MCP server, reverse proxy, `*.got.test` DNS, `got.toml`
+service graph, attempt ledger, egress policy, secrets injection, `--tty`,
+Model A, Linux, snapshot push/pull, snapshot GC policy.
+
+**Delivers:** a developer or agent can create a machine, run migrations
+and services inside it, `got save` at commit boundaries, fork it
+CoW-cheap, restore old runtimes via `git checkout` + `got new`, and drop
+it — using only four verbs and existing git.
+
+### M2 — Adopters
+
+- Thin MCP adapter exposing `new`/`run`/`save`/`drop` as MCP tools.
+- Linux (libkrun + KVM).
+- `got run --tty` for interactive sessions.
+- Model A: virtio-fs host-share with per-ecosystem overlay recipes for
+  `node_modules`, `.venv`, build caches. Opt-in per project.
+- Snapshot GC policy (last-N-per-handle, expire-after-M-days for
+  detached).
+
+### M3+ — Post-PMF possibilities (appendix)
+
+- Snapshot push/pull as a first-class network protocol — share runtime
+  state alongside `git push`. Requires content-addressed transport,
+  chunked upload, and a receiving daemon on the remote.
+- Memory snapshots via alternate drivers (Apple VZ on macOS, Cloud
+  Hypervisor / Firecracker on Linux). Not cross-host portable.
+- Remote hosts: same primitive, remote registry.
+- Egress policy proxy for untrusted agents.
+
+## 13. Risks & mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| libkrun has **no** memory snapshot (unmerged, contested prototype) | No instant live-resume in v1 | Ship disk-state persistence first (covers the core use case); add CH/FC/VZ drivers for memory snapshots in M3; never block on libkrun snapshot |
-| macOS relaxed `fsync` (`KRUN_SYNC_RELAXED`) | Committed writes lost on host power-loss | Contract = "survives switch," not "survives power-loss"; offer per-volume `sync_mode=full`; always guest-quiesce **and host-flush** before any clone |
-| Wrong dev TLD (`.local` → mDNS) | `*.got.*` never resolves on macOS | Use `.got.test` (RFC 6761) + `/etc/resolver/got.test`; `got doctor` verifies |
-| macOS codesigning/entitlements required | App won't launch / can't load dylib | Codesign with `com.apple.security.hypervisor` + disable-library-validation (ad-hoc OK); `got doctor` checks; bundle `libkrunfw` |
-| Golden-image build bootstrap (must run Linux `[build]` steps) | `got init` can't build images on a bare macOS host | Boot a `got`-owned build microVM, or shell out to an external OCI builder; decide in M0 |
-| Model-A deps composition ("per-branch deps" vs shared source) | Headline promise silently broken | Explicit runtime-vs-source overlay rule; default to Model B until solved |
-| virtio-fs performance on large repos (macOS) | Slow file ops in Model A | Offer Model B (in-disk) for heavy repos; cache; benchmark early in M0 |
-| Driver-trait impedance (in-proc lib vs child-proc VMMs vs VZ framework) | Leaky abstraction, schedule blowout | Build M1 against ONE concrete combo; extract traits only when a 2nd driver forces the shape |
-| Storage bloat from many CoW disks | Disk fills up | CoW keeps clones cheap; `got gc`, quotas, shared caches, auto-prune dead branches |
-| Snapshot/DB inconsistency | Data corruption | Mandatory quiesce (fsync/checkpoint) → host-flush → clone; DB-aware hooks in `got.toml` |
-| Scope creep toward "a cloud platform" | Never ships | Local-first, git-verb-scoped MVP; remote/cloud strictly post-M3 |
-| Nested virt / driver portability | Fragmented behavior | libkrun default on *both* OSes for parity; `got doctor` capability detection; add other drivers only where they pay off |
+| Feature creep back to a service graph / MCP-first / ledger | The primitive dies before it ships | The hyperplan MUST-NOT list is the design gate; every added feature must decompose into the four verbs or be rejected |
+| libkrun ABI churn | Rebuild breakage | Pin `stable-1.19.x`; runtime `krun_has_feature`; do not depend on 2.0 until it stabilizes |
+| macOS codesigning / entitlement friction | Install-time bounce | `got doctor` catches missing entitlements; Homebrew formula runs the ad-hoc codesign post-install |
+| Model A composition problem | Silently broken headline promise | Model B is v1 default; Model A blocked until per-ecosystem overlay recipes exist and are tested |
+| Snapshot storage bloat | Disk fills | Content-addressed dedup keeps marginal cost low; v2 adds retention policy; `got drop --snapshots` is the manual knob |
+| Snapshot restore vs live overlay confusion | Users lose recent unsaved work when `got new` restores an older snapshot | Restore semantics documented sharply: `got new` on existing handle prefers snapshot-for-current-HEAD; users are told to `got save` before switching commits |
+| macOS relaxed fsync on live overlay | Committed writes lost on power-loss | Contract = "survives switch"; `got save` uses full sync regardless; opt-in `sync_mode=full` per volume for the live overlay |
+| Backend leak into public surface | Loses "backend-neutral" invariant | CI check: grep of CLI stdout/stderr/usage for `libkrun`/`HVF`/`krunfw` returns 0 |
+| libkrun has no memory snapshots | No instant live-resume in v1 | Save is a **disk-state** snapshot with quiesce; memory-state snapshots come from alternate drivers in M3+ |
 
-## 14. Open questions
+## 14. Open questions (M0 forks only)
 
-- **libkrun binding path** — upstream C ABI (chosen, §3.3) vs the `msb_krun` Rust fork.
-  Confirm the C ABI covers every M1 need against `stable-1.19.x` in the M0 spike.
-- **Golden-image build engine** — require an external OCI builder for v1, or build a
-  `got`-owned build microVM to run `[build] run` Linux steps? (Gates `got init`.)
-- **Model-A composition rule** — exact list of runtime dirs (`node_modules`, `.venv`,
-  build caches) overlaid from the per-branch data disk vs served from the shared source.
-  (Gates the headline "deps persist per branch" promise.)
-- **Agent transport** — vsock-UNIX-proxy vs virtio-serial on macOS (decide in M0).
-- **Durability contract** — is the guarantee "survives switch" (host page cache) or
-  "survives power-loss" (full-sync)? Per-volume `sync_mode`? Different perf profile.
-- Default mount model per project type — can we auto-detect repo size/agent usage and
-  choose Model A vs B?
-- Golden-image rebuild triggers — hash `got.toml` + lockfiles; how to make partial
-  rebuilds fast?
-- ~~How much of Microsandbox to reuse vs. build directly on libkrun.~~ **Resolved:**
-  bind libkrun directly via the upstream C ABI (not `msb_krun`); use Microsandbox only as
-  a reference for VM-launch logic + OCI→rootfs (see §3.3).
-- Secret handling — inject at host/proxy layer (placeholdering) vs. in-guest; default
-  to never baking secrets into images.
-- Multi-user / team registry format for shareable machine states (M4).
+- Agent exec + quiesce transport: vsock UNIX-socket proxy vs virtio-serial
+  on macOS. Decide in M0 bake-off.
+- OCI → bootable rootfs conversion: port Microsandbox's EROFS + VMDK +
+  ext4-overlay design, or shell to an external OCI builder for v1.
+- Snapshot content-hash algorithm: BLAKE3 for speed vs SHA-256 for
+  ubiquity. Decide in M0 based on measured overhead on a 20 GB overlay.
+- Base image cache eviction policy. Content-hash addressed but disk fills.
+  Simple LRU vs explicit `got image prune`.
 
 ## 15. Summary of decisions
 
-1. **MicroVM:** `libkrun` as the default cross-platform backend **on both macOS (HVF) and
-   Linux (KVM)** for code-path parity. `VmmDriver` is a **seam designed early but
-   abstracted late** — Firecracker/Cloud Hypervisor/QEMU/Apple VZ get added only for
-   memory snapshots (M3) and remote hosts (M4), not in M1.
-2. **Backend integration:** bind **libkrun directly** via its **upstream C ABI**, pinned
-   to `stable-1.19.x`, dynamically linked, LGPL-2.1 (macOS binary codesigned with the
-   hypervisor entitlement + `libkrunfw` bundled). Do **not** build on Microsandbox and do
-   **not** adopt its `msb_krun` Rust fork — both would double-stack another team's
-   abstraction. Microsandbox (Apache-2.0) is a **reference only**, for VM-launch logic and
-   its OCI→(EROFS+VMDK+ext4-overlay) rootfs conversion. *(Correction: Microsandbox uses a
-   Rust fork of libkrun, not the C ABI — it is not evidence for the C-ABI path.)*
-3. **State model:** golden base image + **per-branch copy-on-write data disk** (APFS
-   clonefile / reflink / qcow2). Disk-state persistence delivers the core value in v1;
-   memory snapshots are an additive Phase-3 enhancement (and require Model B). Every clone
-   follows quiesce → host-flush → `clonefile`; durability contract is "survives switch."
-4. **Interface:** git-like CLI + `gotd` host manager + `gotd-agent` guest daemon
-   (transport: vsock or virtio-serial, decided in M0). `got switch` pre-flights the git op
-   and rolls back on failure.
-5. **Isolation & networking:** one kernel per branch/worktree; deterministic per-ref
-   ports (M1 via libkrun **TSI + `krun_set_port_map`**, no root/helper) + `*.got.test`
-   (RFC 6761, **not** `.local`) reverse proxy so parallel agents never collide. True
-   simultaneity comes from **worktrees**, not single-dir branch switching.
-6. **Language:** Rust throughout; Linux guests only; local-first, cloud-optional.
+1. **Primitive.** One noun (`machine`), four verbs (`new`, `run`, `save`,
+   `drop`). Nothing else in the public surface. `doctor` and `ls` are
+   diagnostic conveniences, not part of the primitive.
+2. **Hypervisor.** libkrun on both macOS (HVF) and Linux (KVM) for code-path
+   parity. Direct C ABI FFI, `stable-1.19.x`, dynamically linked. No
+   `msb_krun` fork. No Microsandbox at runtime. Backend never leaks into
+   the public surface.
+3. **State model.** Content-addressed golden image + per-machine CoW
+   overlay + content-addressed immutable snapshots keyed by
+   `(handle, head_sha)`. Provenance
+   `(base_commit, recipe_hash, parent_machine)` recorded at `new`. Quiesce
+   → host-flush → clonefile ordering for both fork and save. Live-overlay
+   durability contract is "survives switch"; snapshot durability contract
+   is "survives power loss."
+4. **Storage default.** Model B (code inside machine overlay) in v1. Model
+   A (virtio-fs host-share) deferred to M2 with per-ecosystem overlay
+   recipes.
+5. **Git relationship.** Orthogonal by default. `got` never runs git; git
+   never runs `got` unless the user opts into `got hook install`, which
+   places fail-silent hook scripts in `.git/hooks/` for auto-follow on
+   checkout, commit, merge, and worktree events. Handles shadow refs
+   without modifying them. Promotion is `git merge`.
+6. **No daemon.** `got` is a single binary. Registry is SQLite.
+7. **Networking.** TSI + `krun_set_port_map`. No reverse proxy. No DNS.
+   Ports on localhost.
+8. **Configuration.** `got.toml` records base image ref + recipe inputs +
+   optional `[quiesce]` commands. No services, no health checks, no
+   volumes, no snapshot config. Recipe hash is the golden-image identity.
+9. **Verb-count discipline.** Four *primitive* verbs (`new`/`run`/`save`/
+   `drop`) is the ceiling. The hyperplan bundle rejected orchestration
+   verbs (`spawn`/`promote`/`discard`); save was added because it is a
+   *state* verb parallel to `git commit`. `doctor`, `ls`, and `hook
+   install/uninstall/status` are *administrative* — they do not compose
+   with the primitive verbs and do not count against the ceiling. Any
+   future feature request that requires a fifth primitive verb triggers a
+   design review, not an implementation.

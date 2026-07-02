@@ -1,224 +1,320 @@
 # got — Product Vision
 
-> **Every agent attempt gets its own machine.**
-> *Under the hood, every branch is a machine.*
->
-> `got` gives each git ref, worktree, and agent attempt its own microVM — so the
-> entire application runtime (databases, migrations, running services, caches,
-> installed packages, background jobs, generated files) can be forked, rolled
-> back, and promoted the way you already fork, roll back, and promote code.
+> **Git versions files. `got` versions the machine.**
+> One primitive. Four verbs. A hardware-isolated Linux runtime forked from
+> a commit, saved back to a commit, followed by `git checkout`, dropped
+> when you're done.
+
+See [mvp-plan.md](mvp-plan.md) for the minimal cut that proves the thesis,
+and [plan.md](plan.md) for the full engineering plan.
 
 ---
 
-## 1. The agent-era problem
+## 1. The gap
 
-Coding agents no longer just write code. They **execute** it — running
-migrations, installing packages, starting services, mutating databases, hitting
-the network, seeding data, and leaving residue. Every autonomous run is a real
-state change against a real system.
+Git versions files, and has always been very good at this. But files alone
+are not enough to reproduce the state a running system was in — the
+migrations applied, the packages installed, the services started, the seed
+data loaded. That runtime state has never been a first-class artifact
+anywhere. `git log` knows nothing about it.
 
-Git isolates files. It has never isolated runtime. That gap was a nuisance in
-2020. In 2026, with 4–8 agents open at once against the same repo, it is the
-bottleneck.
+In 2020 this was a nuisance. In 2026 — with agents that install packages,
+run migrations, seed databases, and start services on every task — it is
+the most-blogged dev-infra pain of the year. Every serious write-up on
+running parallel Claude Code / Codex / Cursor agents lands on the same
+wall: `git worktree` isolates files, but the database, the ports, the
+`.env`, the installed packages, and the running services collide.
+Developers describe migrations from one agent corrupting the test
+assumptions of another, `EADDRINUSE` port wars between sibling worktrees,
+and "spin up a separate Docker Compose per worktree? your laptop is now
+a data center."
 
-**The unsafe-mutation problem.** An agent applies a migration to try a refactor.
-The refactor fails. The migration stays. Now the next agent, the next branch,
-and your dev server are all running against the wrong schema. Nobody knows.
+The workaround market has already voted with its feet. In 2025–2026,
+at least **seven independent projects** shipped some flavor of
+"per-git-branch database" — three separately named `pgbranch`, plus
+`wtdb`, `db-git`, `dbfork`, `branchdb`, plus a Rails gem, plus Neon's
+own worktree-subagent guide. Several install the same `post-checkout`
+hook `got` describes. Every one of them is DB-only — because the DB is
+~80% of the pain and `CREATE DATABASE ... TEMPLATE` is 100× easier than
+a microVM. That is the shape of the gap: the pain is validated, the
+design is validated, the whole-runtime version is missing.
 
-**The collision problem.** Three agents in three worktrees all bind port 3000.
-They all migrate "the" database. They all write to the same Redis. Worktrees
-isolate *files*, not *worlds* — the agents corrupt each other silently, and
-you cannot trust any of their results.
+Local microVM sandboxes have started to close the *isolation* half of
+this gap. Docker Sandboxes, Microsandbox, and others give an agent a
+safe place to run. What none of them do is treat the resulting runtime
+state as a versioned artifact of the git repo. That specific gap is
+what `got` fills.
 
-**The rollback gap.** `git reset --hard` rewinds the code. It does not rewind
-the DB, the caches, the installed deps, the background jobs, or the generated
-files. Autonomous agents live in the delta between those two things.
+## 2. The primitive
 
-**The promotion problem.** An agent finds the right approach on attempt 7 of
-12. Its DB has the right migration; its `node_modules` has the right lockfile;
-its logs prove it. Without a primitive to promote that attempt back into git,
-the work is trapped — the only way out is to redo it by hand.
+`got` gives you one thing: a **machine**.
 
-The root cause is the same in every case: **agents mutate whole runtimes, and
-git only versions files.**
+A machine is a hardware-isolated Linux runtime with a copy-on-write disk,
+descended from a content-addressed base image, identified by a stable
+user-chosen handle. Every saved state of a machine is content-addressed
+and associated with a git commit. Machines are a disk plus a recipe — the
+hypervisor is an implementation detail.
 
-## 2. The core idea
+Four verbs, each an extension of a git verb you already use:
 
-`got` makes runtime state a first-class, git-versioned citizen by pairing every
-ref, worktree, and agent attempt with its own **microVM** — a real,
-hardware-isolated Linux machine with its own kernel, disk, network, and
-processes.
+- **`got new <name> [from <src>]`** — like `git checkout -b`, but for
+  runtime. Creates a machine. `<src>` can be a git ref, a commit SHA, a
+  saved snapshot, or another machine. Sub-second copy-on-write.
+  Idempotent: if `<name>` exists, restore the snapshot matching current
+  git HEAD if one exists, otherwise the current live overlay. Add
+  `--detached` for ephemeral machines that auto-GC.
+- **`got run <name> -- <cmd>`** — execute inside a machine. Captures
+  stdout, stderr, exit code. Long-running services persist between
+  invocations (`docker exec` semantics, not `docker run --rm`). Subsumes
+  exec, ssh, logs, and doctor.
+- **`got save [<name>]`** — like `git commit`, but for runtime. Quiesce
+  the machine and snapshot its state, associating the snapshot with the
+  current HEAD SHA of the ref the handle shadows. Idempotent: same HEAD
+  + same content = same snapshot, deduped.
+- **`got drop <name>`** — destroy the live machine and its overlay. Saved
+  snapshots survive.
 
-Two units of state, deliberately distinct:
+The rest composes from these four plus `git`.
 
-- A **branch-machine** is durable state tied to a git ref. Switch to it and its
-  database, migrations, services, and deps come with you.
-- An **attempt-machine** is an ephemeral copy-on-write fork of a branch-machine.
-  Agents run inside attempts. Winners get promoted to branches; losers are
-  garbage-collected.
+## 3. What it feels like
 
-Every fork is instant — APFS `clonefile` on macOS, reflink/ZFS on Linux — so
-forking a 20 GB dev environment is a metadata operation, not a copy. Every
-rollback is total: code, DB, deps, services, caches, and generated files rewind
-together. Every winner becomes real git history: `got try promote` turns an
-attempt-machine into a named branch, ready to push and PR.
-
-## 3. The five-minute demo
+Branch, mutate, commit, snapshot — the full loop:
 
 ```
-$ got init                            # scaffold got.toml, build golden image
-$ got up                              # branch-machine for main is running
-
-# fan out
-$ got try spawn 6 --agent claude "refactor billing to Stripe subscriptions"
-  attempt/a1f3  running  app:51001 db:51002  agent: claude
-  attempt/b820  running  app:51011 db:51012  agent: claude
-  attempt/c4d1  running  app:51021 db:51022  agent: claude
-  attempt/d7ee  running  app:51031 db:51032  agent: claude
-  attempt/e529  running  app:51041 db:51042  agent: claude
-  attempt/f014  running  app:51051 db:51052  agent: claude
-
-# six agents. six databases. six port sets. zero collisions.
-
-$ got try inspect                     # diff, tests, logs, resource use per attempt
-$ got try promote c4d1 --as feature/billing-stripe
-$ got try discard --losers            # everything else is gone
+$ got new feat/billing                       # runtime for this branch
+$ got run feat/billing -- npm run migrate    # migration applied
+$ git commit -am "add billing migration"
+$ got save feat/billing                      # snapshot tagged with commit SHA
 ```
 
-That loop — **fork N attempts, isolate every runtime, promote one, discard the
-rest** — is not a workflow that exists on your laptop today. It is what `got`
-is for.
+Time-travel — the runtime follows `git checkout`:
 
-## 4. Who this is for
+```
+$ git checkout HEAD^                         # go back one commit
+$ got new feat/billing                       # boots HEAD^'s snapshot
+                                             # migration is gone; state matches code
 
-1. **Developers orchestrating coding agents** — Cursor, Claude Code, Codex,
-   opencode, Aider, Factory, Amp — running multiple attempts against stateful
-   apps and needing real isolation, real rollback, and real promotion.
-2. **The agents themselves** — through a first-class MCP server and SDK, so
-   agents create, fork, exec, log, and reset machines as primitives instead of
-   scraping brittle shell commands.
-3. **Solo developers on stateful apps** who are tired of environment drift
-   across their own branches.
-4. **Teams and CI** that need a reproducible, shareable definition of "a
-   running instance of our app" that maps cleanly onto their branch workflow.
+$ git checkout main
+$ got new feat/billing                       # jumps forward to the latest saved state
+```
 
-`got` is **local-first, remote-compatible**. It runs on your M-series laptop
-with no account and no per-second billing. The same primitive extends to a
-shared remote Linux host when you outgrow local — but the wedge is the machine
-already under your desk.
+`git bisect` with real runtime — the demo that is uniquely `got`:
 
-## 5. The product surface
+```
+$ git bisect start bad-sha good-sha
+$ git bisect run bash -c 'got new probe && got run probe -- npm test'
+# each commit boots its saved runtime; migrations, seeds, and installed
+# packages match the code under test. bugs that only reproduce against a
+# specific migration state become bisectable.
+```
 
-Agents are not humans with a keyboard. A must-use agent tool ships more than a
-CLI on day one:
+Fork one machine from another, promote the winner:
 
-- **`got` CLI** — git-native verbs (`up`, `switch`, `worktree`, `branch`,
-  `try`, `reset`, `promote`, `discard`) for humans.
-- **`got mcp serve`** — first-class MCP server. Agents call structured tools:
-  `create_attempt`, `fork`, `exec`, `logs`, `expose_url`, `reset`, `promote`,
-  `set_policy`. No shell scraping.
-- **`got` SDK** — TypeScript and Python bindings so orchestrators (LangGraph,
-  crewAI, custom pipelines) can drive `got` programmatically.
-- **`got.toml`** — the reproducible environment recipe (golden image, services,
-  volumes, policy), committed to the repo.
-- **Attempt ledger** — append-only audit log per attempt: agent, prompt,
-  commands run, ports touched, files changed, network calls made, final diff,
-  outcome. You can read what the agent did before you promote it.
-- **Policy defaults** — egress deny-by-default, secret injection at the proxy
-  layer (never baked into images), hard CPU/mem/disk caps per attempt,
-  per-repo egress allowlists.
+```
+$ got new attempt-1 from feat/billing        # CoW fork, sub-second
+$ got run attempt-1 -- claude "refactor"     # agent runs in the fork
+$ got save attempt-1                         # snapshot the result
+$ git merge attempt-1                        # promote via git
+$ got new feat/billing                       # boots the merged state
+$ got drop attempt-1                         # cleanup
+```
 
-## 6. Design principles
+Rewind runtime and code together:
 
-1. **Git is the source of truth for state, not just code.** If git knows a ref,
-   `got` can give it a machine.
-2. **Programmable, not just interactive.** Every human verb has an MCP tool and
-   an SDK method. Agents are equal-class users.
-3. **Safe by default for autonomous mutation.** Isolation is a hardware
-   guarantee. Egress is denied by default. Resources are capped by default. An
-   agent is *allowed* to migrate the DB and install packages because the blast
-   radius is one machine.
-4. **Rewind-friendly.** Any attempt can be reset. DB, deps, services, caches,
-   and generated files all return to a clean fork point.
-5. **Auditable.** Every attempt leaves a readable ledger before you promote.
-6. **Fast fork or it does not count.** Sub-second CoW disk clones. Boot in
-   seconds. Switching a branch feels like `git switch`.
-7. **Reproducible by default, mutable by choice.** Every machine descends from
-   a declared golden image. Clean state is one command away; accumulated state
-   is preserved unless you ask to discard it.
-8. **Feel like git.** The primary interface mirrors git verbs. No Kubernetes.
-   No YAML sprawl. No daemon to babysit for the common case.
-9. **Local-first, remote-compatible.** Works offline on one laptop. Same
-   primitive runs on a shared remote host without changing the model.
+```
+$ got drop <name> && git reset --hard HEAD^
+# runtime rewinds. code rewinds. no "got reset."
+```
 
-## 7. Why now
+Replace the five-tool stack in one motion:
 
-- **Agents made safe execution the bottleneck.** Writing code is no longer the
-  hard part. Running it against a real system, in parallel, without poisoning
-  the world, is.
-- **MCP became the substrate.** Anthropic's MCP and the OpenAI Agents SDK
-  standardized how agents talk to tools — so a runtime that speaks MCP natively
-  is instantly usable by every serious agent framework.
-- **Local microVMs became cheap.** libkrun boots a Linux microVM on macOS
-  Apple Silicon in under 200 ms with no root, no daemon, and no Docker Desktop.
-  A per-attempt machine is no longer expensive.
-- **Copy-on-write storage is universal.** APFS `clonefile` on macOS and
-  reflink/ZFS/btrfs on Linux make instant, near-free disk forks a primitive we
-  can build on. "Fork the machine" is now a metadata operation.
-- **Cloud sandboxes proved the demand but left the gap.** E2B, Modal, Daytona,
-  Cloudflare Sandboxes, Vercel Sandbox, Runloop — every serious agent stack
-  needs a runtime. None of them is local, branch-attached, and private by
-  default. That is the gap.
+```
+# Before: worktree + port-offset script + .env symlink + pgbranch + compose-project-name
+$ git worktree add ../app-agent-b -b agent/b
+$ PORT_OFFSET=20 ./scripts/worktree-env.sh
+$ pgbranch create agent-b
+$ ln -s ../../app/.env.local .env.local
+$ docker compose -p agent-b up -d
 
-## 8. How it's different
+# After:
+$ git worktree add ../app-agent-b -b agent/b
+$ got new agent-b
+```
 
-| Tool                                 | Type                | Runtime isolation      | Branch-attached state       | Per-attempt fork | Local & private     |
-|--------------------------------------|---------------------|------------------------|-----------------------------|------------------|---------------------|
-| `git worktree`                       | VCS                 | ❌ shared runtime      | ❌                          | ❌               | ✅                  |
-| Docker Compose                       | container           | partial (shared kernel)| ❌ (one shared set)         | ❌               | ✅                  |
-| Dev Containers / Codespaces          | container           | partial (shared kernel)| per-container, not per-ref  | ❌               | Codespaces hosted   |
-| Gitpod / Coder                       | cloud workspace     | container / VM         | per-workspace, not per-ref  | ❌               | hosted              |
-| GitButler                            | VCS UX              | ❌ shared runtime      | ❌                          | ❌               | ✅                  |
-| Neon / PlanetScale / Xata            | DB branching        | DB-scoped only         | DB per branch               | limited          | hosted              |
-| E2B / Modal / Daytona / Runloop      | hosted agent sandbox| microVM / container    | per-session                 | ✅               | ❌ hosted, metered  |
-| Cloudflare / Vercel Sandbox          | edge / hosted       | container / Firecracker| per-session                 | ✅               | ❌ hosted           |
-| Microsandbox / SmolVM                | local microVM       | microVM                | ❌ (session, not ref)       | ✅               | ✅                  |
-| **got**                              | **git-native runtime** | **microVM**         | **✅ per branch and per attempt** | **✅ CoW**  | **✅**              |
+## 4. What git-native runtime enables
 
-`got`'s unique wedge: **local, git-native, branch-attached, per-attempt
-persistent compute.** Nobody else combines those four. Cloud sandboxes own
-hosted programmable agent runtimes; local microVM engines own the primitive;
-`got` owns the git-native lifecycle layer that ties them to how developers and
-agents actually work — refs, forks, attempts, promotions, rollbacks.
+The value is anything git already does, extended to include runtime:
 
-## 9. North star
+- **`git bisect` with runtime state.** Bugs that only reproduce with a
+  specific migration or seed become bisectable — the sharpest single
+  capability `got` uniquely enables.
+- **Time-travel to any historical commit's runtime.** Not just the code
+  — the exact database, cache, and dependency state that existed there.
+- **Branch-shaped runtimes.** A durable name that saves per commit and
+  follows `git checkout`.
+- **Fork-and-promote for agent attempts.** Fork a machine, let an agent
+  work, `git merge` the winner, drop the losers.
+- **CI parity by construction.** The machine that produced the commit
+  *is* the machine that reproduces the commit. No separate CI env drift.
+- **Auto-follow git-checkout (opt-in).** `got hook install` writes
+  fail-silent `post-checkout`, `post-commit`, `post-merge`, and
+  `post-worktree` scripts so the runtime follows the code automatically.
+  Reversible in one command. Off by default.
+- **Portable snapshot format.** Content-addressed, dedup-friendly,
+  git-adjacent. In principle shareable alongside commits (v-future).
 
-`got` becomes **the default execution substrate for coding agents**:
+These are the capabilities the git-native framing uniquely produces. The
+runtime isolation itself — microVM sandboxes for agents — is already a
+category with good implementations, and `got` does not need to reinvent
+it to be useful.
 
-- **Agent tree search over real stateful apps.** Fan out dozens of attempts
-  from a commit; keep the one that works.
-- **Auditable autonomous runs.** Every attempt's ledger is readable before you
-  promote it.
-- **Policy-bounded execution.** Egress, secrets, resources, and time are
-  enforced at the machine boundary — not on the trust of the model.
-- **Promote to git.** Winning attempts become branches, PRs, and merges
-  through the workflow developers already know.
-- **Local ↔ remote continuity.** The same branch-machine lives on your laptop
-  today and on a shared Linux host tomorrow — because it is a portable disk
-  and a recipe, not a hosted account.
+## 5. Design principles
 
-## 10. What year-one success looks like
+Two:
 
-- **Install and first useful demo in under five minutes** on a clean Apple
-  Silicon Mac.
-- **A developer runs 4–8 agents against one repo** without DB, port, or
-  dependency collisions.
-- **Every serious agent framework can drive `got` through MCP** — no bash
-  scraping required.
-- **`got try promote` turns a winning attempt into a branch and a PR**
-  without redoing the work by hand.
-- **Runtime rollback is one command** — code, DB, deps, and services all
-  rewind together.
-- **`got.toml` becomes the default template** for agent-heavy repos.
-- **"But it works on my branch"** stops being a phrase, because the branch —
-  and every attempt under it — *is* the machine.
+1. **Compose with git first.** Anything that can be done by chaining
+   `new`, `run`, `save`, and `drop` with existing git verbs and shell
+   loops should not become a new verb in `got`.
+2. **The backend never leaks.** `libkrun`, `Firecracker`, `Apple VZ`,
+   `HVF`, `krunfw` — none of these words appear in commands, config, or
+   error messages. A machine is a disk and a recipe.
+
+Four verbs is a starting bar, not a religion. Additions require a strong
+case that the workflow cannot be expressed by composition — and a
+stronger case that the fifth verb pays for the conceptual weight it adds.
+
+## 6. Why now
+
+- **The pain became loud in 2026.** Parallel coding agents against one
+  repo made the runtime-collision problem daily, not theoretical. Seven
+  independent per-git-branch workaround tools shipped in one year; every
+  worktree-agent tutorial in 2026 ends on the same "you still need to
+  solve the DB, the ports, and the `.env`." The market is not silent
+  about wanting this.
+- **State branching is a loved behavior, not demo-ware.** Neon reports
+  ~500,000 database branches created per day; PlanetScale users call
+  branching "the one feature we miss most when we touch other systems."
+  When state branching has been shipped in a slice, it has been used at
+  scale. `got` generalizes proven behavior from the DB to the whole
+  runtime.
+- **Local microVMs are now a real category.** libkrun, Apple VZ, and
+  Docker's own sandbox effort have proved that hardware-isolated Linux
+  runtimes on a developer machine are cheap, fast, and safe enough for
+  autonomous agent execution. That is a solved problem, not something
+  `got` needs to prove.
+- **What isn't solved is versioning those runtimes against the repo.**
+  Every existing sandbox treats the workspace as ephemeral and the
+  microVM as disposable. None of them make runtime state a first-class
+  artifact of the git commit that produced it.
+- **Copy-on-write is universal.** APFS `clonefile`, reflink, and ZFS
+  make forking a 20 GB dev environment a metadata operation, not a copy
+  — and make snapshot-per-commit cheap enough to be routine.
+- **Vagrant is the ghost that doesn't haunt you.** Vagrant died from
+  multi-minute boots, gigabytes of RAM per VM, and provisioning pain —
+  not from a lack of desire for versioned environments. HN commenters
+  still say "I miss that pattern so much." `got`'s premises (sub-200 ms
+  boot, CoW metadata-op forks, snapshot-per-commit at the git layer)
+  remove precisely the mechanisms that killed Vagrant. The desire
+  survived the tool.
+
+The gap is specific and small. The isolation category is filling in.
+The git-native runtime versioning category isn't.
+
+## 7. How it's different
+
+`got` is not competing for the local microVM category. That category
+exists and has strong entrants. The real v1 competitor is not Docker
+Sandboxes — it is the **five-tool stack** developers running parallel
+agents already glue together:
+
+1. `git worktree` for file isolation,
+2. a port-offset shell script for `EADDRINUSE`,
+3. a `.env` symlink for missing environment,
+4. a `pgbranch`-style tool for per-branch database state,
+5. a `docker-compose --project-name` hack for services.
+
+Every workaround blog post from 2026 lands on some variant of this
+stack. `got` replaces all five with `got new` + `got run` + `got save`,
+inside the same `git worktree` motion the target user already uses. The
+pitch is not "isolation" (Docker Sandboxes owns that) or "database
+branching" (seven free tools own that). It is **one tool replacing the
+five-tool stack, with the runtime versioned against the commit.**
+
+| Tool                                    | Runtime isolation      | Local & private   | Per-fork CoW state | **Commit-tied snapshots** |
+|-----------------------------------------|------------------------|-------------------|--------------------|---------------------------|
+| `git worktree`                          | shared runtime         | yes               | no                 | no                        |
+| Docker Compose                          | partial (shared kernel)| yes               | no                 | no                        |
+| Dev Containers / Codespaces             | partial (shared kernel)| Codespaces hosted | no                 | no                        |
+| Gitpod / Coder                          | container / VM         | hosted            | no                 | no                        |
+| E2B / Modal / Daytona / Vercel Sandbox  | microVM / container    | hosted, metered   | yes                | session-scoped            |
+| Microsandbox / SmolVM                   | microVM                | yes               | yes                | manual                    |
+| **Docker Sandboxes (`sbx`)**            | **microVM**            | **yes**           | not first-class    | **no**                    |
+| pgbranch / wtdb / db-git / branchdb     | DB only                | yes               | DB only            | git-hook, DB only         |
+| **got**                                 | microVM                | yes               | first-class        | **yes, per commit**       |
+
+Docker Sandboxes is the closest peer on isolation — real distribution,
+integrated with major coding agents, no commit-tied snapshots. The
+DB-per-branch tools are the closest peer on git-native versioning
+behavior — one collision layer solved, four to go. `got` sits between
+the two categories with a claim neither can make: **the whole runtime,
+versioned per commit, one tool.** It could plausibly run on top of
+another project's microVM primitive — the git-native versioning layer
+is the piece nobody else is building.
+
+## 8. North star
+
+`got` becomes the standard way runtime state is versioned against a git
+repo — the layer `git log` doesn't see today. It succeeds if:
+
+- A developer can `git checkout <sha>` and reboot the exact runtime that
+  existed at that commit.
+- `git bisect` with a runtime-dependent test is a one-liner.
+- The `git worktree add` + `got new` combination replaces the five-tool
+  stack for the parallel-coding-agent workflow already teaching itself
+  in the wild.
+- The snapshot format is open and portable enough that snapshots
+  produced by `got` can move between hosts, and eventually between
+  providers.
+
+The runtime isolation itself, and the mainstream agent-sandboxing use
+case, may well be owned by others. `got` doesn't need to own that to be
+worth building. It rides the existing worktree-agent motion instead of
+asking anyone to change how they work.
+
+## 9. What year-one success looks like
+
+- **Install and first useful machine in under five minutes** on a clean
+  Apple Silicon Mac.
+- **`got new` returns in under a second** for a warm 20 GB base image.
+- **`got save` completes in under a second** for a typical commit's
+  worth of state change.
+- **`git checkout <old-sha>` + `got new <name>`** restores the exact
+  runtime that existed at that commit, deterministically.
+- **`git bisect run` with `got new` in the loop** works well enough to
+  be the recommended way to hunt runtime-dependent regressions.
+- **A documented, stable snapshot format** — versioned, portable across
+  `got` releases, and open enough to build on.
+- **At least one project publicly using `got`** for parallel agent
+  attempts against real commits, with winners promoted via `git merge`.
+
+## 10. Kill criteria
+
+The decision to build `got` carries three explicit off-ramps. Written
+down now so they cannot be rationalized away later.
+
+- **Before building** — if a weekend spike cannot achieve microVM boot
+  plus APFS-CoW snapshot restore under ~2 s on a real Apple Silicon
+  Mac, the core promise is at risk and the plan re-opens. See
+  [mvp-plan.md](mvp-plan.md) §4 WP0.
+- **At three months** — if the worktree-agent developers who wrote the
+  2026 collision-pain blog posts (the natural first 20 users) try `got`
+  and still prefer their five-tool script stack, the whole-runtime
+  premise is wrong. Fall back to contributing to the DB-per-branch
+  tools instead of building parallel to them.
+- **Anytime** — if Docker Sandboxes or Morph ships commit-keyed runtime
+  snapshots as a first-class feature, the git-native wedge is gone.
+  Pivot to the snapshot-format / interop-layer play, or stop.
+
+Everything beyond the year-one bar — snapshot registry, team sharing,
+CI integration, platform build-out — is v-future and depends on whether
+the primitive earns its keep first.
