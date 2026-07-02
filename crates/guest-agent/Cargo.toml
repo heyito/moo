@@ -1,0 +1,16 @@
+[package]
+name = "guest-agent"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "got-agent"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+strip = true

@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["crates/spike", "crates/guest-agent"]
+default-members = ["crates/spike"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
