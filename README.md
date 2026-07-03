@@ -159,6 +159,17 @@ $ for name in a b c; do got new agent-$name from HEAD; done
 - `git reset --hard` and `git rebase` move HEAD without any hook — the
   machine doesn't auto-follow; run `got new <name>` afterwards.
 
+## See it work
+
+Three self-contained, self-verifying demos (each cleans up after itself):
+
+```
+$ scripts/demo-timetravel.sh   # runtime follows git checkout, survives drop
+$ scripts/demo-parallel.sh     # 3 machines, same guest port, zero collisions
+$ scripts/demo-bisect.sh       # git bisect finds a bug that only exists in a
+                               # specific migration state — unattended
+```
+
 ## Development
 
 ```
