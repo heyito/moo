@@ -73,6 +73,15 @@ got drop <name> [--force] [--snapshots]    destroy the machine (snapshots surviv
   machine's name (sub-second copy-on-write fork).
 - **`run`** has `docker exec` semantics: services you start keep running
   between invocations. Exit codes and output round-trip faithfully.
+- **The working tree follows you automatically.** `new` and `run`, invoked
+  from inside the machine's repository, sync your working tree — tracked
+  files plus untracked-unignored files, exactly what `git status` calls
+  your work — into the machine at `/srv/app` (configurable via
+  `[project] workdir`). Unchanged trees are skipped in milliseconds.
+  Gitignored files are never pushed and never deleted, so `node_modules`,
+  build output, and the machine's own `.env` survive every sync. The host
+  tree is authoritative: files you delete or switch away from on the host
+  disappear in the machine too.
 - **`save`** is `git commit` for the runtime. Idempotent — same commit,
   same content, same snapshot. Byte-identical states share storage.
 - **`drop`** destroys the live machine. Saved snapshots survive unless you
@@ -102,6 +111,7 @@ service graphs, health checks, or volumes:
 ```toml
 [project]
 base = "debian:bookworm"     # any OCI image reference
+workdir = "/srv/app"         # where the working tree is synced in the guest
 
 [recipe]
 lockfiles = ["package-lock.json"]   # participate in the base image identity
@@ -151,9 +161,15 @@ $ for name in a b c; do got new agent-$name from HEAD; done
 - **Durability.** A live machine's disk survives machine shutdown, not
   host power loss. Snapshots are flushed to physical disk and survive
   power loss.
-- **Ports.** Guest TCP services are reachable on host localhost at the
-  port shown by `got ls`. TCP half-close is not proxied faithfully — plain
-  request/response protocols (HTTP etc.) are unaffected.
+- **Network isolation.** Every machine has a fully private network stack.
+  `localhost` inside the machine is the machine's own loopback — never the
+  host's. Host services are not reachable from the guest's loopback, and
+  two machines never share network state.
+- **Ports.** Guest TCP services listed in `[network] ports` are reachable
+  on host localhost at the port shown by `got ls`. Like containers, a
+  service must listen on a non-loopback address (`0.0.0.0`) to be
+  reachable from the host. TCP half-close is not proxied faithfully —
+  plain request/response protocols (HTTP etc.) are unaffected.
 - **Platform.** macOS Apple Silicon hosts, Linux guests (arm64). Linux
   host support is planned.
 - `git reset --hard` and `git rebase` move HEAD without any hook — the

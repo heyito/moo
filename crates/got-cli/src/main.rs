@@ -101,6 +101,14 @@ fn cmd_new(args: &[String]) -> Result<i32> {
     } else {
         println!("machine '{}' ready", outcome.handle);
     }
+    if let Some(s) = &outcome.synced {
+        println!(
+            "working tree synced: {} files ({:.1} MB) at {}",
+            s.files,
+            s.bytes as f64 / 1e6,
+            s.workdir
+        );
+    }
     Ok(0)
 }
 
@@ -210,7 +218,7 @@ fn cmd_ls() -> Result<i32> {
             .map(|s| &s[..s.len().min(12)])
             .unwrap_or("-");
         let ports = if row.machine.port_map.is_empty() {
-            "(all, 1:1)".to_string()
+            "(none)".to_string()
         } else {
             row.machine
                 .port_map
@@ -249,6 +257,12 @@ fn cmd_doctor() -> Result<i32> {
         "machine firmware installed",
         got_vmm::firmware_installed(),
         "machine firmware is missing — see the install section of the README",
+    );
+
+    check(
+        "machine network runtime installed",
+        got_vmm::net_proxy_installed(),
+        "the network runtime is missing — re-run scripts/install.sh",
     );
 
     let store_on_apfs = {

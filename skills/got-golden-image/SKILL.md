@@ -22,6 +22,7 @@ Only if it doesn't exist. Minimal schema — no services, no volumes:
 ```toml
 [project]
 base = "debian:bookworm"          # any OCI image reference
+workdir = "/srv/app"              # guest path the working tree syncs into
 
 [recipe]
 lockfiles = ["package-lock.json"] # files whose content identifies the image
@@ -53,12 +54,33 @@ minutes depending on image size.
 
 ## Step 3: Provision inside the machine
 
+`got new base` already synced the working tree to the guest workdir.
 Install the project's runtime **inside** the machine, not on the host.
 Everything runs as root in the guest:
 
 ```bash
 got run base -- 'apt-get update -q && apt-get install -y -q git curl <runtime> <db>'
 got run base -- '<start services, create db users, etc.>'
+got run base -- 'cd /srv/app && <install dependencies: npm ci / bun install / pip install ...>'
+```
+
+Write service starts to `/etc/rc.local` (make it executable) — the machine
+runs it on every boot, so services come back after restores and reboots:
+
+```bash
+got run base -- 'printf "#!/bin/sh\nservice postgresql start\nservice redis-server start\n" > /etc/rc.local && chmod +x /etc/rc.local && sh /etc/rc.local'
+```
+
+Services that should be reachable from the host (via the `got ls` port map)
+must listen on `0.0.0.0`, not only on loopback — the same rule as
+containers. The machine's own loopback is private: `localhost` inside the
+machine never reaches host services, and machines never see each other.
+
+Gitignored files (like `.env`) are not synced; seed required secrets or
+local config into the machine explicitly:
+
+```bash
+got run base -- "printf '%s\n' 'DATABASE_URL=...' > /srv/app/.env"
 ```
 
 Best effort: if a dependency or credential isn't available, provision what

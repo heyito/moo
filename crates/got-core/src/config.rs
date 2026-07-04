@@ -29,7 +29,11 @@ pub struct Project {
     /// OCI reference or Dockerfile path. The fetch/build pipeline is
     /// post-MVP; this participates in the recipe hash today.
     pub base: Option<String>,
+    /// Guest directory the working tree is synced into. Default /srv/app.
+    pub workdir: Option<String>,
 }
+
+pub const DEFAULT_WORKDIR: &str = "/srv/app";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,10 +88,18 @@ impl GotToml {
         }
     }
 
+    pub fn workdir(&self) -> &str {
+        self.project.workdir.as_deref().unwrap_or(DEFAULT_WORKDIR)
+    }
+
     /// The golden-image identity: hash(base + lockfile contents + resources)
     /// per plan.md §9. Two developers with the same inputs get the same hash.
     pub fn recipe_hash(&self, project_root: &std::path::Path) -> String {
         let mut hasher = blake3::Hasher::new();
+        // Guest-agent protocol version: images embed the agent, so a protocol
+        // change must produce a new image identity (old cached images carry
+        // an agent that can't serve the new ops).
+        hasher.update(&[crate::sync::AGENT_PROTO_VERSION]);
         hasher.update(self.project.base.as_deref().unwrap_or("default").as_bytes());
         for lockfile in &self.recipe.lockfiles {
             hasher.update(lockfile.as_bytes());

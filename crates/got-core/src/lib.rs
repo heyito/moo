@@ -4,6 +4,7 @@ pub mod config;
 pub mod git;
 pub mod image;
 pub mod shim;
+pub mod sync;
 
 use anyhow::{bail, Context, Result};
 use got_store::{
@@ -106,6 +107,19 @@ pub struct NewOutcome {
     /// Set when the machine was rebooted from a saved snapshot.
     pub restored_from: Option<Snapshot>,
     pub created: bool,
+    /// Set when the working tree was synced into the machine.
+    pub synced: Option<sync::SyncOutcome>,
+}
+
+/// The guest tree may differ from anything the host remembers after a
+/// create/restore — force the next sync and run it now if the caller is
+/// inside the machine's repository.
+fn sync_after_new(reg: &Registry, name: &str) -> Result<Option<sync::SyncOutcome>> {
+    sync::invalidate(name);
+    let Some(machine) = reg.get_machine(name)? else {
+        return Ok(None);
+    };
+    sync::sync_into(&machine)
 }
 
 /// `got new <name> [from <src>]` — idempotent create/restore (plan.md §6.1).
@@ -134,20 +148,24 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
                 }
                 cow_clone(Path::new(&snap.snapshot_path), &overlay)?;
                 boot(name)?;
+                let synced = sync_after_new(&reg, name)?;
                 return Ok(NewOutcome {
                     handle: name.to_string(),
                     restored_from: Some(snap),
                     created: false,
+                    synced,
                 });
             }
         }
         if !shim::is_running(name) {
             boot(name)?;
         }
+        let synced = sync_after_new(&reg, name)?;
         return Ok(NewOutcome {
             handle: name.to_string(),
             restored_from: None,
             created: false,
+            synced,
         });
     }
 
@@ -234,25 +252,40 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
         cpus: cfg.cpus(),
         ram_mib: cfg.ram_mib(),
         port_map: format_port_map(&port_map),
+        project_root: git::toplevel()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     })?;
 
     boot(name)?;
+    let synced = sync_after_new(&reg, name)?;
     Ok(NewOutcome {
         handle: name.to_string(),
         restored_from,
         created: true,
+        synced,
     })
 }
 
 /// `got run <name> -- <cmd>` — execute inside the machine (plan.md §6.2).
+/// The working tree follows the code: when invoked from the machine's
+/// repository, any host-side change is synced in before the command runs.
 pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
     let reg = Registry::open()?;
-    if reg.get_machine(name)?.is_none() {
+    let Some(machine) = reg.get_machine(name)? else {
         bail!("no machine '{}' — create it with `got new {}`", name, name);
-    }
+    };
     if !shim::is_running(name) {
         // Machines persist between invocations; reboot the live overlay.
         boot(name)?;
+    }
+    if let Some(s) = sync::sync_into(&machine)? {
+        eprintln!(
+            "got: synced {} files ({:.1} MB) to {}",
+            s.files,
+            s.bytes as f64 / 1e6,
+            s.workdir
+        );
     }
     shim::request(name, cmd.as_bytes())
 }
@@ -327,6 +360,8 @@ pub fn drop_machine(name: &str, force: bool, drop_snapshots: bool) -> Result<()>
             }
             let _ = std::fs::remove_file(shim::socket_path(name));
             let _ = std::fs::remove_file(shim::pid_path(name));
+            let _ = std::fs::remove_file(shim::net_socket_path(name));
+            let _ = std::fs::remove_file(shim::net_api_path(name));
         } else {
             stop(name)?;
         }
@@ -339,6 +374,7 @@ pub fn drop_machine(name: &str, force: bool, drop_snapshots: bool) -> Result<()>
         }
         reg.remove_machine(name)?;
     }
+    sync::invalidate(name);
 
     if drop_snapshots {
         let removed = reg.remove_snapshots(name)?;

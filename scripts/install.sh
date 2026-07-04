@@ -20,6 +20,7 @@ brew tap slp/krun 2>/dev/null || true
 brew trust slp/krun 2>/dev/null || true
 brew list libkrun   >/dev/null 2>&1 || brew install slp/krun/libkrun
 brew list libkrunfw >/dev/null 2>&1 || brew install slp/krun/libkrunfw
+brew list gvproxy   >/dev/null 2>&1 || brew install slp/krun/gvproxy
 brew list e2fsprogs >/dev/null 2>&1 || brew install e2fsprogs
 
 say "Adding the guest build target"

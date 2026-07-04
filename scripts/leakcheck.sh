@@ -4,7 +4,7 @@
 set -uo pipefail
 
 GOT="${1:-target/release/got}"
-PATTERN='libkrun|krunfw|krunkit|firecracker|cloud.hypervisor|apple.vz|hvf'
+PATTERN='libkrun|krunfw|krunkit|gvproxy|vfkit|firecracker|cloud.hypervisor|apple.vz|hvf'
 
 fail=0
 check() {

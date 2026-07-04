@@ -6,11 +6,27 @@
 //! Reserved commands understood by the agent:
 //!   __quiesce__   flush guest filesystems (used by save)
 //!   __poweroff__  flush and power the machine off (used by drop)
+//!   __synctree__  replace a directory tree with a gzipped tar payload
+//!                 (used by the automatic working-tree sync)
 
 use std::io::{Read, Write};
 
 pub const QUIESCE: &[u8] = b"__quiesce__";
 pub const POWEROFF: &[u8] = b"__poweroff__";
+
+/// Prefix of a sync-tree frame: `__synctree__\0<target>\0<gzipped tar>`.
+pub const SYNCTREE_PREFIX: &[u8] = b"__synctree__\0";
+
+/// Build a sync-tree frame for `target` (absolute guest path) carrying a
+/// gzipped tar of the tree to install there.
+pub fn synctree_frame(target: &str, gz_tar: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(SYNCTREE_PREFIX.len() + target.len() + 1 + gz_tar.len());
+    frame.extend_from_slice(SYNCTREE_PREFIX);
+    frame.extend_from_slice(target.as_bytes());
+    frame.push(0);
+    frame.extend_from_slice(gz_tar);
+    frame
+}
 
 pub fn send_request(w: &mut impl Write, cmd: &[u8]) -> std::io::Result<()> {
     w.write_all(&(cmd.len() as u32).to_be_bytes())?;

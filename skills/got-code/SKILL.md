@@ -30,12 +30,20 @@ got new feat/x from base     # or: got new feat/x
 
 3. Run **everything runtime-related inside the machine**: migrations,
    seeds, servers, tests, package installs. Edit code on the host as
-   normal; copy or sync it into the machine when the project's workflow
-   requires it.
+   normal — `got new` and `got run` automatically sync your working tree
+   (tracked + untracked-unignored files, uncommitted changes included)
+   into the machine at `/srv/app` (or `[project] workdir` from got.toml)
+   whenever it changed. Gitignored files are never pushed or deleted, so
+   the machine's own `node_modules`, build output, and `.env` survive.
 
 ```bash
 got run feat/x -- 'cd /srv/app && npm run migrate'
 ```
+
+The host tree is authoritative for synced files: host edits and deletions
+propagate on the next `run`; guest edits to synced files last only until
+the host tree next changes. Machines only sync when the command is run
+from inside the repository they were created from.
 
 ## The one rule: save at commit boundaries
 
@@ -83,8 +91,12 @@ its own stable host port per declared guest port (see `got ls`).
 - Services started in a machine keep running between `got run` calls.
   Start them with `nohup … &` inside the command.
 - Reach guest services from the host at `localhost:<host-port>` from
-  `got ls`. Plain request/response protocols (HTTP) work; TCP half-close
-  is not proxied faithfully.
+  `got ls`. A service must listen on `0.0.0.0` (not only loopback) to be
+  reachable from the host — the same rule as containers. Plain
+  request/response protocols (HTTP) work; TCP half-close is not proxied
+  faithfully.
+- The machine's loopback is private: `localhost` inside the machine is
+  the machine's own, never the host's, and machines never see each other.
 - A stopped machine reboots automatically on the next `got run`.
 - Live machine disk survives shutdown, not host power loss; snapshots
   survive power loss.

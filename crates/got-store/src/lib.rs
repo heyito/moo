@@ -102,8 +102,11 @@ pub struct Machine {
     pub created_at: i64,
     pub cpus: u8,
     pub ram_mib: u32,
-    /// "host:guest" pairs, comma-separated. Empty = expose all guest ports.
+    /// "host:guest" pairs, comma-separated. Empty = no ports published.
     pub port_map: String,
+    /// Host path of the git repository this machine was created from; the
+    /// working tree there is auto-synced into the guest. Empty = no repo.
+    pub project_root: String,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +159,7 @@ impl Registry {
             "ALTER TABLE machines ADD COLUMN cpus INTEGER NOT NULL DEFAULT 2",
             "ALTER TABLE machines ADD COLUMN ram_mib INTEGER NOT NULL DEFAULT 4096",
             "ALTER TABLE machines ADD COLUMN port_map TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE machines ADD COLUMN project_root TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(stmt, []);
         }
@@ -166,8 +170,9 @@ impl Registry {
         self.conn.execute(
             "INSERT INTO machines
              (handle, base_commit, recipe_hash, parent_machine, base_image_path,
-              overlay_path, lifecycle, detached, created_at, cpus, ram_mib, port_map)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              overlay_path, lifecycle, detached, created_at, cpus, ram_mib, port_map,
+              project_root)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 m.handle,
                 m.base_commit,
@@ -181,6 +186,7 @@ impl Registry {
                 m.cpus as i64,
                 m.ram_mib as i64,
                 m.port_map,
+                m.project_root,
             ],
         )?;
         Ok(())
@@ -188,7 +194,8 @@ impl Registry {
 
     const MACHINE_COLS: &'static str =
         "handle, base_commit, recipe_hash, parent_machine, base_image_path,
-         overlay_path, lifecycle, detached, created_at, cpus, ram_mib, port_map";
+         overlay_path, lifecycle, detached, created_at, cpus, ram_mib, port_map,
+         project_root";
 
     fn row_to_machine(r: &rusqlite::Row) -> rusqlite::Result<Machine> {
         Ok(Machine {
@@ -204,6 +211,7 @@ impl Registry {
             cpus: r.get::<_, i64>(9)? as u8,
             ram_mib: r.get::<_, i64>(10)? as u32,
             port_map: r.get(11)?,
+            project_root: r.get(12)?,
         })
     }
 

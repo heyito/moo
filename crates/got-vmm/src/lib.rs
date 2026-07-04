@@ -27,6 +27,21 @@ pub const EXEC_PORT_NAME: &str = "got-exec";
 const DISK_FORMAT_RAW: u32 = 0;
 const SYNC_MODE_RELAXED: u32 = 1;
 
+// Machine network: every machine gets a private network stack behind a
+// per-machine userspace proxy. The guest address plan is fixed — each
+// machine has its own proxy instance, so identical addressing never
+// collides across machines.
+pub const GUEST_IP: &str = "192.168.127.2";
+pub const GUEST_GATEWAY: &str = "192.168.127.1";
+const GUEST_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
+
+// virtio-net feature bits (uapi/linux/virtio_net.h) matching the proxy's
+// expectations: checksum offload + TSO/UFO in both directions.
+const NET_FEATURES: u32 =
+    (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14);
+/// The proxy expects a magic handshake after connecting (vfkit-compatible).
+const NET_FLAG_HANDSHAKE: u32 = 1 << 0;
+
 #[link(name = "krun")]
 extern "C" {
     fn krun_set_log_level(level: u32) -> i32;
@@ -63,8 +78,42 @@ extern "C" {
         input_fd: i32,
         output_fd: i32,
     ) -> i32;
-    fn krun_set_port_map(ctx_id: u32, port_map: *const *const c_char) -> i32;
+    fn krun_add_net_unixgram(
+        ctx_id: u32,
+        c_path: *const c_char,
+        fd: i32,
+        c_mac: *const u8,
+        features: u32,
+        flags: u32,
+    ) -> i32;
     fn krun_start_enter(ctx_id: u32) -> i32;
+}
+
+/// Locate the userspace network proxy binary that carries each machine's
+/// private network. Installed by scripts/install.sh alongside the firmware.
+pub fn net_proxy_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("GOT_NET_PROXY") {
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    for c in [
+        "/opt/homebrew/opt/gvproxy/bin/gvproxy",
+        "/opt/homebrew/bin/gvproxy",
+        "/usr/local/bin/gvproxy",
+    ] {
+        let p = std::path::PathBuf::from(c);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// True if the network proxy is installed (`got doctor`).
+pub fn net_proxy_installed() -> bool {
+    net_proxy_path().is_some()
 }
 
 /// True if the boot firmware is installed where we expect it.
@@ -92,9 +141,10 @@ pub struct MachineConfig<'a> {
     pub cpus: u8,
     pub ram_mib: u32,
     pub console_log: &'a str,
-    /// "host:guest" TCP port pairs. Empty = expose every listening guest
-    /// port on the same host port number.
-    pub port_map: Vec<String>,
+    /// Unixgram socket where this machine's network proxy is listening.
+    /// The guest's virtio-net device attaches here; the machine gets a
+    /// fully private network stack (its loopback never touches the host).
+    pub net_socket: &'a str,
     /// Read end of the host-to-guest pipe (guest agent input).
     pub serial_input_fd: RawFd,
     /// Write end of the guest-to-host pipe (guest agent output).
@@ -165,12 +215,22 @@ pub fn enter(cfg: &MachineConfig) -> Result<()> {
             "exec port",
         )?;
 
-        if !cfg.port_map.is_empty() {
-            let entries: Vec<CString> = cfg.port_map.iter().map(|p| cstr(p)).collect();
-            let mut ptrs: Vec<*const c_char> = entries.iter().map(|e| e.as_ptr()).collect();
-            ptrs.push(std::ptr::null());
-            check(krun_set_port_map(ctx, ptrs.as_ptr()), "port map")?;
-        }
+        // A dedicated virtio-net device replaces the default socket-
+        // impersonation backend: adding it gives the guest a real, private
+        // network stack, so in-guest loopback stays in the guest and host
+        // services are never silently reachable at guest-local addresses.
+        let net_path = cstr(cfg.net_socket);
+        check(
+            krun_add_net_unixgram(
+                ctx,
+                net_path.as_ptr(),
+                -1,
+                GUEST_MAC.as_ptr(),
+                NET_FEATURES,
+                NET_FLAG_HANDSHAKE,
+            ),
+            "network",
+        )?;
 
         let log_path = cstr(cfg.console_log);
         check(krun_set_console_output(ctx, log_path.as_ptr()), "console log")?;
