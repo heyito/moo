@@ -1,14 +1,14 @@
 //! Automatic working-tree sync: the machine follows the code.
 //!
-//! `got new` and `got run`, when invoked from inside the git repository a
+//! `moo new` and `moo run`, when invoked from inside the git repository a
 //! machine was created from, push the working tree (tracked files plus
 //! untracked-unignored files — exactly what `git status` considers "your
 //! work") into the guest at the project workdir (`/srv/app` by default,
-//! `[project] workdir` in got.toml).
+//! `[project] workdir` in moo.toml).
 //!
 //! Design constraints this satisfies:
 //! - Model B is preserved: the code lands *inside* the machine overlay, so
-//!   `got save` snapshots code + packages + services + data together and
+//!   `moo save` snapshots code + packages + services + data together and
 //!   restore is bit-exact — including uncommitted work as it stood at save.
 //! - Gitignored files are never pushed and never deleted in the guest:
 //!   node_modules, build output, and guest-managed .env survive every sync.
@@ -19,7 +19,7 @@
 
 use crate::{config, git, shim};
 use anyhow::{bail, Context, Result};
-use got_store::{runtime_dir, Machine};
+use moo_store::{runtime_dir, Machine};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -70,7 +70,7 @@ fn worktree_files(root: &Path) -> Result<Vec<String>> {
 
 /// Fingerprint of the tree's shape: paths, sizes, and mtimes. Content is
 /// deliberately not read — this must be cheap enough to run on every
-/// `got run` of a large repository.
+/// `moo run` of a large repository.
 fn fingerprint(root: &Path, files: &[String]) -> String {
     let mut hasher = blake3::Hasher::new();
     for rel in files {
@@ -149,14 +149,14 @@ pub fn sync_into(machine: &Machine) -> Result<Option<SyncOutcome>> {
     let workdir = cfg.workdir().to_string();
     let payload = pack(&root, &files)?;
     let bytes = payload.len();
-    let frame = got_vmm::proto::synctree_frame(&workdir, &payload);
+    let frame = moo_vmm::proto::synctree_frame(&workdir, &payload);
 
     let (code, out) = shim::request(&machine.handle, &frame)
         .with_context(|| format!("sync working tree into '{}'", machine.handle))?;
     if code != 0 {
         bail!(
             "machine '{}' could not install the working tree: {} \
-             (machines created before working-tree sync need `got drop {}` and `got new {}`)",
+             (machines created before working-tree sync need `moo drop {}` and `moo new {}`)",
             machine.handle,
             String::from_utf8_lossy(&out).trim(),
             machine.handle,

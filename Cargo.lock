@@ -217,51 +217,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "got-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "got-core",
- "got-store",
- "got-vmm",
-]
-
-[[package]]
-name = "got-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "flate2",
- "got-store",
- "got-vmm",
- "libc",
- "serde",
- "serde_json",
- "tar",
- "toml",
- "ureq",
-]
-
-[[package]]
-name = "got-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "libc",
- "rusqlite",
-]
-
-[[package]]
-name = "got-vmm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
-]
-
-[[package]]
 name = "guest-agent"
 version = "0.0.1"
 dependencies = [
@@ -471,6 +426,51 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "moo-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "moo-core",
+ "moo-store",
+ "moo-vmm",
+]
+
+[[package]]
+name = "moo-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "flate2",
+ "libc",
+ "moo-store",
+ "moo-vmm",
+ "serde",
+ "serde_json",
+ "tar",
+ "toml",
+ "ureq",
+]
+
+[[package]]
+name = "moo-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "libc",
+ "rusqlite",
+]
+
+[[package]]
+name = "moo-vmm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
 ]
 
 [[package]]

@@ -22,7 +22,7 @@ const FIRMWARE_LEAF: &str = "libkrunfw.5.dylib";
 pub const LOADER_PATH_VAR: &str = "DYLD_FALLBACK_LIBRARY_PATH";
 
 /// Name of the serial port the guest agent serves the exec protocol on.
-pub const EXEC_PORT_NAME: &str = "got-exec";
+pub const EXEC_PORT_NAME: &str = "moo-exec";
 
 const DISK_FORMAT_RAW: u32 = 0;
 const SYNC_MODE_RELAXED: u32 = 1;
@@ -92,7 +92,7 @@ extern "C" {
 /// Locate the userspace network proxy binary that carries each machine's
 /// private network. Installed by scripts/install.sh alongside the firmware.
 pub fn net_proxy_path() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("GOT_NET_PROXY") {
+    if let Ok(p) = std::env::var("MOO_NET_PROXY") {
         let p = std::path::PathBuf::from(p);
         if p.exists() {
             return Some(p);
@@ -111,7 +111,7 @@ pub fn net_proxy_path() -> Option<std::path::PathBuf> {
     None
 }
 
-/// True if the network proxy is installed (`got doctor`).
+/// True if the network proxy is installed (`moo doctor`).
 pub fn net_proxy_installed() -> bool {
     net_proxy_path().is_some()
 }
@@ -167,7 +167,7 @@ fn check(rc: i32, what: &str) -> Result<()> {
 /// Returns only on configuration failure.
 pub fn enter(cfg: &MachineConfig) -> Result<()> {
     // Internal debug knob; never documented, never in user-facing output.
-    let log_level: u32 = std::env::var("GOT_ENGINE_LOG")
+    let log_level: u32 = std::env::var("MOO_ENGINE_LOG")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -238,7 +238,7 @@ pub fn enter(cfg: &MachineConfig) -> Result<()> {
         let workdir = cstr("/");
         check(krun_set_workdir(ctx, workdir.as_ptr()), "workdir")?;
 
-        let exec_path = cstr("/usr/local/bin/got-agent");
+        let exec_path = cstr("/usr/local/bin/moo-agent");
         let args = [cstr("--serial")];
         let arg_ptrs: [*const c_char; 2] = [args[0].as_ptr(), std::ptr::null()];
         let envs = [

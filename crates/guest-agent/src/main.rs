@@ -10,7 +10,7 @@
 //!
 //! Transports under test:
 //!   --vsock   listen on vsock port 1024, one connection per exec
-//!   --serial  serve framed requests sequentially on the "got-exec" serial port
+//!   --serial  serve framed requests sequentially on the "moo-exec" serial port
 
 #[cfg(target_os = "linux")]
 mod agent {
@@ -21,7 +21,7 @@ mod agent {
     use std::process::Command;
 
     const VSOCK_PORT: u32 = 1024;
-    const SERIAL_PORT_NAME: &str = "got-exec";
+    const SERIAL_PORT_NAME: &str = "moo-exec";
     const SYNCTREE_PREFIX: &[u8] = b"__synctree__\0";
 
     // The machine's private network plan. Fixed for every machine: each one
@@ -33,7 +33,7 @@ mod agent {
     /// Name of the bookkeeping file a synced tree carries so the next sync
     /// can delete files that disappeared on the host without touching
     /// guest-only artifacts (node_modules, build output, .env, ...).
-    const MANIFEST: &str = ".got-sync-manifest";
+    const MANIFEST: &str = ".moo-sync-manifest";
 
     // ---- network bring-up ------------------------------------------------
     //
@@ -134,12 +134,12 @@ mod agent {
     fn net_setup() {
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if fd < 0 {
-            eprintln!("got-agent: net: no AF_INET sockets: {}", std::io::Error::last_os_error());
+            eprintln!("moo-agent: net: no AF_INET sockets: {}", std::io::Error::last_os_error());
             return;
         }
 
         if let Err(e) = if_up(fd, "lo") {
-            eprintln!("got-agent: net: {}", e);
+            eprintln!("moo-agent: net: {}", e);
         }
 
         // The NIC can probe slightly after the agent starts; wait for it.
@@ -153,17 +153,17 @@ mod agent {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         if !addr_set {
-            eprintln!("got-agent: net: eth0 did not appear; machine has no network");
+            eprintln!("moo-agent: net: eth0 did not appear; machine has no network");
             unsafe { libc::close(fd) };
             return;
         }
 
         let mut req = IfReq::with_sockaddr("eth0", SockaddrGen::inet(NETMASK));
         if unsafe { ioctl(fd, SIOCSIFNETMASK, &mut req as *mut _ as *mut _) } != 0 {
-            eprintln!("got-agent: net: eth0 netmask: {}", std::io::Error::last_os_error());
+            eprintln!("moo-agent: net: eth0 netmask: {}", std::io::Error::last_os_error());
         }
         if let Err(e) = if_up(fd, "eth0") {
-            eprintln!("got-agent: net: {}", e);
+            eprintln!("moo-agent: net: {}", e);
         }
 
         let mut route = RtEntry {
@@ -182,7 +182,7 @@ mod agent {
             rt_irtt: 0,
         };
         if unsafe { ioctl(fd, SIOCADDRT, &mut route as *mut _ as *mut _) } != 0 {
-            eprintln!("got-agent: net: default route: {}", std::io::Error::last_os_error());
+            eprintln!("moo-agent: net: default route: {}", std::io::Error::last_os_error());
         }
         unsafe { libc::close(fd) };
 
@@ -191,7 +191,7 @@ mod agent {
             GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3]
         );
         if let Err(e) = fs::write("/etc/resolv.conf", dns) {
-            eprintln!("got-agent: net: resolv.conf: {}", e);
+            eprintln!("moo-agent: net: resolv.conf: {}", e);
         }
     }
 
@@ -397,7 +397,7 @@ mod agent {
                     None
                 })
             })
-            .expect("serial port got-exec not found");
+            .expect("serial port moo-exec not found");
         let mut stream = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -430,12 +430,12 @@ mod agent {
         match Command::new("/bin/sh").arg("/etc/rc.local").output() {
             Ok(out) if !out.status.success() => {
                 eprintln!(
-                    "got-agent: rc.local exited {}: {}",
+                    "moo-agent: rc.local exited {}: {}",
                     out.status.code().unwrap_or(-1),
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
             }
-            Err(e) => eprintln!("got-agent: rc.local: {}", e),
+            Err(e) => eprintln!("moo-agent: rc.local: {}", e),
             _ => {}
         }
     }
@@ -448,7 +448,7 @@ mod agent {
             "--vsock" => vsock_loop(),
             "--serial" => serial_loop(),
             _ => {
-                eprintln!("usage: got-agent --vsock|--serial");
+                eprintln!("usage: moo-agent --vsock|--serial");
                 std::process::exit(2);
             }
         }
@@ -460,7 +460,7 @@ fn main() {
     agent::run();
     #[cfg(not(target_os = "linux"))]
     {
-        eprintln!("got-agent only runs inside a Linux guest");
+        eprintln!("moo-agent only runs inside a Linux guest");
         std::process::exit(1);
     }
 }

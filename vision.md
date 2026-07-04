@@ -1,6 +1,6 @@
-# got — Product Vision
+# moo — Product Vision
 
-> **Git versions files. `got` versions the machine.**
+> **Git versions files. `moo` versions the machine.**
 > One primitive. Four verbs. A hardware-isolated Linux runtime forked from
 > a commit, saved back to a commit, followed by `git checkout`, dropped
 > when you're done.
@@ -34,7 +34,7 @@ at least **seven independent projects** shipped some flavor of
 "per-git-branch database" — three separately named `pgbranch`, plus
 `wtdb`, `db-git`, `dbfork`, `branchdb`, plus a Rails gem, plus Neon's
 own worktree-subagent guide. Several install the same `post-checkout`
-hook `got` describes. Every one of them is DB-only — because the DB is
+hook `moo` describes. Every one of them is DB-only — because the DB is
 ~80% of the pain and `CREATE DATABASE ... TEMPLATE` is 100× easier than
 a microVM. That is the shape of the gap: the pain is validated, the
 design is validated, the whole-runtime version is missing.
@@ -43,11 +43,11 @@ Local microVM sandboxes have started to close the *isolation* half of
 this gap. Docker Sandboxes, Microsandbox, and others give an agent a
 safe place to run. What none of them do is treat the resulting runtime
 state as a versioned artifact of the git repo. That specific gap is
-what `got` fills.
+what `moo` fills.
 
 ## 2. The primitive
 
-`got` gives you one thing: a **machine**.
+`moo` gives you one thing: a **machine**.
 
 A machine is a hardware-isolated Linux runtime with a copy-on-write disk,
 descended from a content-addressed base image, identified by a stable
@@ -57,21 +57,21 @@ hypervisor is an implementation detail.
 
 Four verbs, each an extension of a git verb you already use:
 
-- **`got new <name> [from <src>]`** — like `git checkout -b`, but for
+- **`moo new <name> [from <src>]`** — like `git checkout -b`, but for
   runtime. Creates a machine. `<src>` can be a git ref, a commit SHA, a
   saved snapshot, or another machine. Sub-second copy-on-write.
   Idempotent: if `<name>` exists, restore the snapshot matching current
   git HEAD if one exists, otherwise the current live overlay. Add
   `--detached` for ephemeral machines that auto-GC.
-- **`got run <name> -- <cmd>`** — execute inside a machine. Captures
+- **`moo run <name> -- <cmd>`** — execute inside a machine. Captures
   stdout, stderr, exit code. Long-running services persist between
   invocations (`docker exec` semantics, not `docker run --rm`). Subsumes
   exec, ssh, logs, and doctor.
-- **`got save [<name>]`** — like `git commit`, but for runtime. Quiesce
+- **`moo save [<name>]`** — like `git commit`, but for runtime. Quiesce
   the machine and snapshot its state, associating the snapshot with the
   current HEAD SHA of the ref the handle shadows. Idempotent: same HEAD
   + same content = same snapshot, deduped.
-- **`got drop <name>`** — destroy the live machine and its overlay. Saved
+- **`moo drop <name>`** — destroy the live machine and its overlay. Saved
   snapshots survive.
 
 The rest composes from these four plus `git`.
@@ -81,28 +81,28 @@ The rest composes from these four plus `git`.
 Branch, mutate, commit, snapshot — the full loop:
 
 ```
-$ got new feat/billing                       # runtime for this branch
-$ got run feat/billing -- npm run migrate    # migration applied
+$ moo new feat/billing                       # runtime for this branch
+$ moo run feat/billing -- npm run migrate    # migration applied
 $ git commit -am "add billing migration"
-$ got save feat/billing                      # snapshot tagged with commit SHA
+$ moo save feat/billing                      # snapshot tagged with commit SHA
 ```
 
 Time-travel — the runtime follows `git checkout`:
 
 ```
 $ git checkout HEAD^                         # go back one commit
-$ got new feat/billing                       # boots HEAD^'s snapshot
+$ moo new feat/billing                       # boots HEAD^'s snapshot
                                              # migration is gone; state matches code
 
 $ git checkout main
-$ got new feat/billing                       # jumps forward to the latest saved state
+$ moo new feat/billing                       # jumps forward to the latest saved state
 ```
 
-`git bisect` with real runtime — the demo that is uniquely `got`:
+`git bisect` with real runtime — the demo that is uniquely `moo`:
 
 ```
 $ git bisect start bad-sha good-sha
-$ git bisect run bash -c 'got new probe && got run probe -- npm test'
+$ git bisect run bash -c 'moo new probe && moo run probe -- npm test'
 # each commit boots its saved runtime; migrations, seeds, and installed
 # packages match the code under test. bugs that only reproduce against a
 # specific migration state become bisectable.
@@ -111,19 +111,19 @@ $ git bisect run bash -c 'got new probe && got run probe -- npm test'
 Fork one machine from another, promote the winner:
 
 ```
-$ got new attempt-1 from feat/billing        # CoW fork, sub-second
-$ got run attempt-1 -- claude "refactor"     # agent runs in the fork
-$ got save attempt-1                         # snapshot the result
+$ moo new attempt-1 from feat/billing        # CoW fork, sub-second
+$ moo run attempt-1 -- claude "refactor"     # agent runs in the fork
+$ moo save attempt-1                         # snapshot the result
 $ git merge attempt-1                        # promote via git
-$ got new feat/billing                       # boots the merged state
-$ got drop attempt-1                         # cleanup
+$ moo new feat/billing                       # boots the merged state
+$ moo drop attempt-1                         # cleanup
 ```
 
 Rewind runtime and code together:
 
 ```
-$ got drop <name> && git reset --hard HEAD^
-# runtime rewinds. code rewinds. no "got reset."
+$ moo drop <name> && git reset --hard HEAD^
+# runtime rewinds. code rewinds. no "moo reset."
 ```
 
 Replace the five-tool stack in one motion:
@@ -138,7 +138,7 @@ $ docker compose -p agent-b up -d
 
 # After:
 $ git worktree add ../app-agent-b -b agent/b
-$ got new agent-b
+$ moo new agent-b
 ```
 
 ## 4. What git-native runtime enables
@@ -147,7 +147,7 @@ The value is anything git already does, extended to include runtime:
 
 - **`git bisect` with runtime state.** Bugs that only reproduce with a
   specific migration or seed become bisectable — the sharpest single
-  capability `got` uniquely enables.
+  capability `moo` uniquely enables.
 - **Time-travel to any historical commit's runtime.** Not just the code
   — the exact database, cache, and dependency state that existed there.
 - **Branch-shaped runtimes.** A durable name that saves per commit and
@@ -156,7 +156,7 @@ The value is anything git already does, extended to include runtime:
   work, `git merge` the winner, drop the losers.
 - **CI parity by construction.** The machine that produced the commit
   *is* the machine that reproduces the commit. No separate CI env drift.
-- **Auto-follow git-checkout (opt-in).** `got hook install` writes
+- **Auto-follow git-checkout (opt-in).** `moo hook install` writes
   fail-silent `post-checkout`, `post-commit`, `post-merge`, and
   `post-worktree` scripts so the runtime follows the code automatically.
   Reversible in one command. Off by default.
@@ -165,7 +165,7 @@ The value is anything git already does, extended to include runtime:
 
 These are the capabilities the git-native framing uniquely produces. The
 runtime isolation itself — microVM sandboxes for agents — is already a
-category with good implementations, and `got` does not need to reinvent
+category with good implementations, and `moo` does not need to reinvent
 it to be useful.
 
 ## 5. Design principles
@@ -174,7 +174,7 @@ Two:
 
 1. **Compose with git first.** Anything that can be done by chaining
    `new`, `run`, `save`, and `drop` with existing git verbs and shell
-   loops should not become a new verb in `got`.
+   loops should not become a new verb in `moo`.
 2. **The backend never leaks.** `libkrun`, `Firecracker`, `Apple VZ`,
    `HVF`, `krunfw` — none of these words appear in commands, config, or
    error messages. A machine is a disk and a recipe.
@@ -195,13 +195,13 @@ stronger case that the fifth verb pays for the conceptual weight it adds.
   ~500,000 database branches created per day; PlanetScale users call
   branching "the one feature we miss most when we touch other systems."
   When state branching has been shipped in a slice, it has been used at
-  scale. `got` generalizes proven behavior from the DB to the whole
+  scale. `moo` generalizes proven behavior from the DB to the whole
   runtime.
 - **Local microVMs are now a real category.** libkrun, Apple VZ, and
   Docker's own sandbox effort have proved that hardware-isolated Linux
   runtimes on a developer machine are cheap, fast, and safe enough for
   autonomous agent execution. That is a solved problem, not something
-  `got` needs to prove.
+  `moo` needs to prove.
 - **What isn't solved is versioning those runtimes against the repo.**
   Every existing sandbox treats the workspace as ephemeral and the
   microVM as disposable. None of them make runtime state a first-class
@@ -212,7 +212,7 @@ stronger case that the fifth verb pays for the conceptual weight it adds.
 - **Vagrant is the ghost that doesn't haunt you.** Vagrant died from
   multi-minute boots, gigabytes of RAM per VM, and provisioning pain —
   not from a lack of desire for versioned environments. HN commenters
-  still say "I miss that pattern so much." `got`'s premises (sub-200 ms
+  still say "I miss that pattern so much." `moo`'s premises (sub-200 ms
   boot, CoW metadata-op forks, snapshot-per-commit at the git layer)
   remove precisely the mechanisms that killed Vagrant. The desire
   survived the tool.
@@ -222,7 +222,7 @@ The git-native runtime versioning category isn't.
 
 ## 7. How it's different
 
-`got` is not competing for the local microVM category. That category
+`moo` is not competing for the local microVM category. That category
 exists and has strong entrants. The real v1 competitor is not Docker
 Sandboxes — it is the **five-tool stack** developers running parallel
 agents already glue together:
@@ -234,7 +234,7 @@ agents already glue together:
 5. a `docker-compose --project-name` hack for services.
 
 Every workaround blog post from 2026 lands on some variant of this
-stack. `got` replaces all five with `got new` + `got run` + `got save`,
+stack. `moo` replaces all five with `moo new` + `moo run` + `moo save`,
 inside the same `git worktree` motion the target user already uses. The
 pitch is not "isolation" (Docker Sandboxes owns that) or "database
 branching" (seven free tools own that). It is **one tool replacing the
@@ -250,12 +250,12 @@ five-tool stack, with the runtime versioned against the commit.**
 | Microsandbox / SmolVM                   | microVM                | yes               | yes                | manual                    |
 | **Docker Sandboxes (`sbx`)**            | **microVM**            | **yes**           | not first-class    | **no**                    |
 | pgbranch / wtdb / db-git / branchdb     | DB only                | yes               | DB only            | git-hook, DB only         |
-| **got**                                 | microVM                | yes               | first-class        | **yes, per commit**       |
+| **moo**                                 | microVM                | yes               | first-class        | **yes, per commit**       |
 
 Docker Sandboxes is the closest peer on isolation — real distribution,
 integrated with major coding agents, no commit-tied snapshots. The
 DB-per-branch tools are the closest peer on git-native versioning
-behavior — one collision layer solved, four to go. `got` sits between
+behavior — one collision layer solved, four to go. `moo` sits between
 the two categories with a claim neither can make: **the whole runtime,
 versioned per commit, one tool.** It could plausibly run on top of
 another project's microVM primitive — the git-native versioning layer
@@ -263,21 +263,21 @@ is the piece nobody else is building.
 
 ## 8. North star
 
-`got` becomes the standard way runtime state is versioned against a git
+`moo` becomes the standard way runtime state is versioned against a git
 repo — the layer `git log` doesn't see today. It succeeds if:
 
 - A developer can `git checkout <sha>` and reboot the exact runtime that
   existed at that commit.
 - `git bisect` with a runtime-dependent test is a one-liner.
-- The `git worktree add` + `got new` combination replaces the five-tool
+- The `git worktree add` + `moo new` combination replaces the five-tool
   stack for the parallel-coding-agent workflow already teaching itself
   in the wild.
 - The snapshot format is open and portable enough that snapshots
-  produced by `got` can move between hosts, and eventually between
+  produced by `moo` can move between hosts, and eventually between
   providers.
 
 The runtime isolation itself, and the mainstream agent-sandboxing use
-case, may well be owned by others. `got` doesn't need to own that to be
+case, may well be owned by others. `moo` doesn't need to own that to be
 worth building. It rides the existing worktree-agent motion instead of
 asking anyone to change how they work.
 
@@ -285,21 +285,21 @@ asking anyone to change how they work.
 
 - **Install and first useful machine in under five minutes** on a clean
   Apple Silicon Mac.
-- **`got new` returns in under a second** for a warm 20 GB base image.
-- **`got save` completes in under a second** for a typical commit's
+- **`moo new` returns in under a second** for a warm 20 GB base image.
+- **`moo save` completes in under a second** for a typical commit's
   worth of state change.
-- **`git checkout <old-sha>` + `got new <name>`** restores the exact
+- **`git checkout <old-sha>` + `moo new <name>`** restores the exact
   runtime that existed at that commit, deterministically.
-- **`git bisect run` with `got new` in the loop** works well enough to
+- **`git bisect run` with `moo new` in the loop** works well enough to
   be the recommended way to hunt runtime-dependent regressions.
 - **A documented, stable snapshot format** — versioned, portable across
-  `got` releases, and open enough to build on.
-- **At least one project publicly using `got`** for parallel agent
+  `moo` releases, and open enough to build on.
+- **At least one project publicly using `moo`** for parallel agent
   attempts against real commits, with winners promoted via `git merge`.
 
 ## 10. Kill criteria
 
-The decision to build `got` carries three explicit off-ramps. Written
+The decision to build `moo` carries three explicit off-ramps. Written
 down now so they cannot be rationalized away later.
 
 - **Before building** — if a weekend spike cannot achieve microVM boot
@@ -307,7 +307,7 @@ down now so they cannot be rationalized away later.
   Mac, the core promise is at risk and the plan re-opens. See
   [mvp-plan.md](mvp-plan.md) §4 WP0.
 - **At three months** — if the worktree-agent developers who wrote the
-  2026 collision-pain blog posts (the natural first 20 users) try `got`
+  2026 collision-pain blog posts (the natural first 20 users) try `moo`
   and still prefer their five-tool script stack, the whole-runtime
   premise is wrong. Fall back to contributing to the DB-per-branch
   tools instead of building parallel to them.

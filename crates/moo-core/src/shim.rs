@@ -1,4 +1,4 @@
-//! The machine supervisor. `got` has no daemon (plan.md §4.1): each running
+//! The machine supervisor. `moo` has no daemon (plan.md §4.1): each running
 //! machine is owned by one detached shim process that boots the guest as a
 //! child and proxies the exec protocol between a per-machine UNIX socket and
 //! the guest's serial channel.
@@ -8,8 +8,8 @@
 //! machine `sealed` in the registry.
 
 use anyhow::{bail, Context, Result};
-use got_store::{runtime_dir, Registry};
-use got_vmm::proto;
+use moo_store::{runtime_dir, Registry};
+use moo_vmm::proto;
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -47,7 +47,7 @@ pub fn sanitize(handle: &str) -> String {
 /// One instance per machine: each guest gets its own network, so identical
 /// guest addressing never collides across machines.
 fn start_net_proxy(handle: &str) -> Result<std::process::Child> {
-    let bin = got_vmm::net_proxy_path()
+    let bin = moo_vmm::net_proxy_path()
         .context("machine network runtime is missing — re-run scripts/install.sh")?;
     let net_sock = net_socket_path(handle);
     let api_sock = net_api_path(handle);
@@ -105,7 +105,7 @@ fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
         let body = format!(
             r#"{{"local":"127.0.0.1:{}","remote":"{}:{}"}}"#,
             host,
-            got_vmm::GUEST_IP,
+            moo_vmm::GUEST_IP,
             guest
         );
         net_api_post(&api, "/services/forwarder/expose", &body)
@@ -115,7 +115,7 @@ fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
 }
 
 /// Entry point for the hidden `__shim` subcommand. Blocks until the guest
-/// powers off. The caller (got new) has already set the loader path so the
+/// powers off. The caller (moo new) has already set the loader path so the
 /// forked guest can find its firmware. Everything else about the machine
 /// (overlay, resources, ports) comes from its registry row.
 pub fn run(handle: &str) -> Result<()> {
@@ -162,7 +162,7 @@ pub fn run(handle: &str) -> Result<()> {
             libc::close(h2g[1]);
             libc::close(g2h[0]);
         }
-        let cfg = got_vmm::MachineConfig {
+        let cfg = moo_vmm::MachineConfig {
             overlay: &overlay,
             cpus: machine.cpus,
             ram_mib: machine.ram_mib,
@@ -172,7 +172,7 @@ pub fn run(handle: &str) -> Result<()> {
             serial_output_fd: g2h[1],
         };
         // Only returns on failure.
-        let err = got_vmm::enter(&cfg).unwrap_err();
+        let err = moo_vmm::enter(&cfg).unwrap_err();
         eprintln!("{:#}", err);
         std::process::exit(1);
     }

@@ -1,19 +1,19 @@
 ---
-name: got-verify
-description: Produce real, human-checkable evidence from a got machine that an implemented change actually works — videos for UI, raw API request/responses for backends, queries with outputs and plans for databases — before claiming completion. Use after implementing any feature or fix in a project that uses got, or when the user asks to verify, prove, or show evidence that something works.
+name: moo-verify
+description: Produce real, human-checkable evidence from a moo machine that an implemented change actually works — videos for UI, raw API request/responses for backends, queries with outputs and plans for databases — before claiming completion. Use after implementing any feature or fix in a project that uses moo, or when the user asks to verify, prove, or show evidence that something works.
 ---
 
 # Verify with evidence a human can check
 
 Claims of "done" must be backed by observations of the running system, not
 by reading the code. The machine is a real Linux VM with the project's
-actual runtime, reachable from the host via its mapped ports (`got ls`).
+actual runtime, reachable from the host via its mapped ports (`moo ls`).
 The deliverable of verification is an **evidence pack**: raw artifacts a
 human can open and judge in seconds without re-running anything.
 
 Two absolutes:
 
-- **Never verify against production.** Evidence comes from the got machine
+- **Never verify against production.** Evidence comes from the moo machine
   (or another local/staging target) only. Never use production
   credentials, databases, or live customer data. If a URL, cookie, or
   connection string looks production-like, stop and record the claim as
@@ -79,7 +79,7 @@ HTTP/1.1 202 Accepted
 {"queued":true,"runId":512}
 
 # state readback — one pending run on the head SHA, not two:
-$ got run feat/1761 -- "su postgres -c \"psql -d app -c \\\"SELECT id,status,head_sha FROM pipeline_runs WHERE pull_request_id=7\\\"\""
+$ moo run feat/1761 -- "su postgres -c \"psql -d app -c \\\"SELECT id,status,head_sha FROM pipeline_runs WHERE pull_request_id=7\\\"\""
  id  | status  | head_sha
  512 | pending | a1b2c3d...
 (1 row)
@@ -103,8 +103,8 @@ Rules, in the spirit of a QA agent's raw captures:
 1. Turn the change into claims ("endpoint X returns Y", "column Z exists
    and is indexed", "clicking A shows B"). One evidence pack per claim.
 2. Get the runtime serving: start the app/services inside the machine
-   (`got run <m> -- 'cd /srv/app && nohup <serve> &'`), find the host
-   port with `got ls`.
+   (`moo run <m> -- 'cd /srv/app && nohup <serve> &'`), find the host
+   port with `moo ls`.
 3. For each claim, capture the matching artifact from the table:
    - UI: drive the app through a real browser against
      `http://127.0.0.1:<host-port>` and record it (screen recording,
@@ -112,9 +112,9 @@ Rules, in the spirit of a QA agent's raw captures:
      meaningful step if video is impossible.
    - API: `curl -si` (or the project's client) from the host, saved
      verbatim with the response.
-   - DB: `got run <m> -- 'psql ... -c "<query>"'` for output and
+   - DB: `moo run <m> -- 'psql ... -c "<query>"'` for output and
      `EXPLAIN (ANALYZE, BUFFERS)` for plans.
-   - Tests: `got run <m> -- 'cd /srv/app && <test cmd>'` — record the
+   - Tests: `moo run <m> -- 'cd /srv/app && <test cmd>'` — record the
      exit code, not just the tail of the output.
 4. Run the negative/edge case, not only the happy path.
 5. If a check needs setup that exists in the repo (seed script, fixture,
@@ -125,7 +125,7 @@ Rules, in the spirit of a QA agent's raw captures:
    is reproducible at this exact commit:
 
 ```bash
-got save <machine>
+moo save <machine>
 ```
 
 ## Blocked is a result too — with proof

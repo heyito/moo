@@ -12,5 +12,5 @@ MKFS=/opt/homebrew/opt/e2fsprogs/sbin/mkfs.ext4
 
 rm -f "$OUT"
 # -d populates the filesystem from the directory; no mount, no root needed.
-"$MKFS" -q -F -d "$ROOTFS" -L gotroot "$OUT" "$SIZE"
+"$MKFS" -q -F -d "$ROOTFS" -L mooroot "$OUT" "$SIZE"
 echo "built $OUT ($SIZE) from $ROOTFS"

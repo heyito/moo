@@ -1,4 +1,4 @@
-//! got — git for the machine. Four verbs: new, run, save, drop.
+//! moo — git for the machine. Four verbs: new, run, save, drop.
 //! Admin: ls, doctor. (plan.md §10)
 //!
 //! Argument parsing is hand-rolled: the surface is five commands and the
@@ -13,7 +13,7 @@ fn main() {
     let code = match dispatch(&args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("got: {:#}", e);
+            eprintln!("moo: {:#}", e);
             1
         }
     };
@@ -38,20 +38,20 @@ fn dispatch(args: &[String]) -> Result<i32> {
 
 fn print_usage() {
     eprintln!(
-        "got — git for the machine
+        "moo — git for the machine
 
 usage:
-  got new <name> [from <src>] [--detached]   create a machine (restores the
+  moo new <name> [from <src>] [--detached]   create a machine (restores the
                                              snapshot for the current commit
                                              if one was saved)
-  got run <name> -- <cmd> [args...]          execute inside the machine
-  got save [<name>]                          snapshot state, tag with the
+  moo run <name> -- <cmd> [args...]          execute inside the machine
+  moo save [<name>]                          snapshot state, tag with the
                                              current commit
-  got drop <name> [--force] [--snapshots]    destroy the machine (saved
+  moo drop <name> [--force] [--snapshots]    destroy the machine (saved
                                              snapshots survive by default)
 
-  got ls                                     list machines and snapshots
-  got doctor                                 check this host can run machines"
+  moo ls                                     list machines and snapshots
+  moo doctor                                 check this host can run machines"
     );
 }
 
@@ -81,7 +81,7 @@ fn cmd_new(args: &[String]) -> Result<i32> {
         (None, false) => bail!("machine name required (or --detached)"),
     };
 
-    let outcome = got_core::new_machine(&name, from.as_deref(), detached)?;
+    let outcome = moo_core::new_machine(&name, from.as_deref(), detached)?;
     if let Some(snap) = &outcome.restored_from {
         let sha = snap.head_sha.as_deref().unwrap_or("(detached)");
         println!(
@@ -92,7 +92,7 @@ fn cmd_new(args: &[String]) -> Result<i32> {
         );
         if !outcome.created {
             eprintln!(
-                "note: the previous live state of '{}' was replaced; `got save` before switching commits to keep it",
+                "note: the previous live state of '{}' was replaced; `moo save` before switching commits to keep it",
                 outcome.handle
             );
         }
@@ -114,10 +114,10 @@ fn cmd_new(args: &[String]) -> Result<i32> {
 
 fn cmd_run(args: &[String]) -> Result<i32> {
     let Some(name) = args.first() else {
-        bail!("usage: got run <name> -- <cmd> [args...]");
+        bail!("usage: moo run <name> -- <cmd> [args...]");
     };
     let Some(sep) = args.iter().position(|a| a == "--") else {
-        bail!("usage: got run <name> -- <cmd> [args...]");
+        bail!("usage: moo run <name> -- <cmd> [args...]");
     };
     let cmd_parts = &args[sep + 1..];
     if cmd_parts.is_empty() {
@@ -125,13 +125,13 @@ fn cmd_run(args: &[String]) -> Result<i32> {
     }
     // Each argv token is shell-quoted so the guest's `sh -c` sees exactly
     // what the caller's shell passed. A single token is left untouched so
-    // `got run m -- 'echo a && echo b'` still composes as a shell command.
+    // `moo run m -- 'echo a && echo b'` still composes as a shell command.
     let cmd = if cmd_parts.len() == 1 {
         cmd_parts[0].clone()
     } else {
         cmd_parts.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
     };
-    let (code, out) = got_core::run_in_machine(name, &cmd)?;
+    let (code, out) = moo_core::run_in_machine(name, &cmd)?;
     std::io::stdout().write_all(&out)?;
     Ok(code as i32)
 }
@@ -139,11 +139,11 @@ fn cmd_run(args: &[String]) -> Result<i32> {
 fn cmd_save(args: &[String]) -> Result<i32> {
     match args.first() {
         Some(name) => {
-            let o = got_core::save_machine(name)?;
+            let o = moo_core::save_machine(name)?;
             print_save(name, &o);
         }
         None => {
-            let all = got_core::save_all()?;
+            let all = moo_core::save_all()?;
             if all.is_empty() {
                 println!("no machines to save");
             }
@@ -168,7 +168,7 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-fn print_save(name: &str, o: &got_core::SaveOutcome) {
+fn print_save(name: &str, o: &moo_core::SaveOutcome) {
     let sha = o.snapshot.head_sha.as_deref().unwrap_or("(no commit)");
     let sha_short = &sha[..sha.len().min(12)];
     if o.fresh {
@@ -193,14 +193,14 @@ fn cmd_drop(args: &[String]) -> Result<i32> {
             other => bail!("unexpected argument '{}'", other),
         }
     }
-    let Some(name) = name else { bail!("usage: got drop <name> [--force] [--snapshots]") };
-    got_core::drop_machine(&name, force, snapshots)?;
+    let Some(name) = name else { bail!("usage: moo drop <name> [--force] [--snapshots]") };
+    moo_core::drop_machine(&name, force, snapshots)?;
     println!("machine '{}' dropped{}", name, if snapshots { " (snapshots too)" } else { "" });
     Ok(0)
 }
 
 fn cmd_ls() -> Result<i32> {
-    let rows = got_core::list()?;
+    let rows = moo_core::list()?;
     if rows.is_empty() {
         println!("no machines");
         return Ok(0);
@@ -255,26 +255,26 @@ fn cmd_doctor() -> Result<i32> {
 
     check(
         "machine firmware installed",
-        got_vmm::firmware_installed(),
+        moo_vmm::firmware_installed(),
         "machine firmware is missing — see the install section of the README",
     );
 
     check(
         "machine network runtime installed",
-        got_vmm::net_proxy_installed(),
+        moo_vmm::net_proxy_installed(),
         "the network runtime is missing — re-run scripts/install.sh",
     );
 
     let store_on_apfs = {
         // clonefile requires APFS; probe by cloning a scratch file.
-        let dir = got_store::got_home();
+        let dir = moo_store::moo_home();
         std::fs::create_dir_all(&dir).ok();
         let probe = dir.join(".doctor-probe");
         let clone = dir.join(".doctor-probe-clone");
         let _ = std::fs::remove_file(&probe);
         let _ = std::fs::remove_file(&clone);
         std::fs::write(&probe, b"probe").is_ok()
-            && got_store::cow_clone(&probe, &clone).is_ok()
+            && moo_store::cow_clone(&probe, &clone).is_ok()
             && {
                 let _ = std::fs::remove_file(&probe);
                 let _ = std::fs::remove_file(&clone);
@@ -284,12 +284,12 @@ fn cmd_doctor() -> Result<i32> {
     check(
         "storage supports copy-on-write clones",
         store_on_apfs,
-        "~/.got must live on an APFS volume",
+        "~/.moo must live on an APFS volume",
     );
 
     check(
         "filesystem tools installed",
-        got_core::image::tools_installed(),
+        moo_core::image::tools_installed(),
         "install with: brew install e2fsprogs",
     );
 
@@ -311,7 +311,7 @@ fn cmd_doctor() -> Result<i32> {
     check(
         "binary is signed for machine isolation",
         entitled,
-        "re-install got, or run: codesign --force --sign - --entitlements entitlements.plist $(which got)",
+        "re-install moo, or run: codesign --force --sign - --entitlements entitlements.plist $(which moo)",
     );
 
     Ok(if ok { 0 } else { 1 })
@@ -321,6 +321,6 @@ fn cmd_shim(args: &[String]) -> Result<i32> {
     let [handle] = args else {
         bail!("internal: bad supervisor invocation");
     };
-    got_core::shim::run(handle)?;
+    moo_core::shim::run(handle)?;
     Ok(0)
 }

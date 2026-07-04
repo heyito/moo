@@ -3,7 +3,7 @@
 # user-facing output. Runs every CLI surface and greps stdout+stderr.
 set -uo pipefail
 
-GOT="${1:-target/release/got}"
+MOO="${1:-target/release/moo}"
 PATTERN='libkrun|krunfw|krunkit|gvproxy|vfkit|firecracker|cloud.hypervisor|apple.vz|hvf'
 
 fail=0
@@ -18,12 +18,12 @@ check() {
     fi
 }
 
-check "usage"        "$GOT"
-check "doctor"       "$GOT" doctor
-check "ls"           "$GOT" ls
-check "run-missing"  "$GOT" run no-such-machine -- true
-check "drop-missing" "$GOT" drop no-such-machine
-check "new-badsrc"   "$GOT" new leaktest from not-a-real-source
+check "usage"        "$MOO"
+check "doctor"       "$MOO" doctor
+check "ls"           "$MOO" ls
+check "run-missing"  "$MOO" run no-such-machine -- true
+check "drop-missing" "$MOO" drop no-such-machine
+check "new-badsrc"   "$MOO" new leaktest from not-a-real-source
 
 if [ "$fail" -eq 0 ]; then
     echo "leakcheck: PASS (no backend names in user-facing output)"

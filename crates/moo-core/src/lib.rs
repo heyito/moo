@@ -7,7 +7,7 @@ pub mod shim;
 pub mod sync;
 
 use anyhow::{bail, Context, Result};
-use got_store::{
+use moo_store::{
     cow_clone, machines_dir, save_snapshot, timestamp, Machine, Registry, Snapshot,
 };
 use std::path::{Path, PathBuf};
@@ -21,18 +21,18 @@ fn overlay_path(handle: &str) -> PathBuf {
 fn boot(handle: &str) -> Result<()> {
     let exe = std::env::current_exe().context("locate own binary")?;
     // Internal debug: keep the supervisor's stderr when engine logging is on.
-    let stderr = if std::env::var("GOT_ENGINE_LOG").is_ok() {
+    let stderr = if std::env::var("MOO_ENGINE_LOG").is_ok() {
         let f = std::fs::File::create(
-            got_store::runtime_dir().join(format!("{}.engine.log", shim::sanitize(handle))),
+            moo_store::runtime_dir().join(format!("{}.engine.log", shim::sanitize(handle))),
         )?;
         std::process::Stdio::from(f)
     } else {
         std::process::Stdio::null()
     };
-    std::fs::create_dir_all(got_store::runtime_dir())?;
+    std::fs::create_dir_all(moo_store::runtime_dir())?;
     std::process::Command::new(exe)
         .args(["__shim", handle])
-        .env(got_vmm::LOADER_PATH_VAR, got_vmm::loader_path_value())
+        .env(moo_vmm::LOADER_PATH_VAR, moo_vmm::loader_path_value())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(stderr)
@@ -91,7 +91,7 @@ fn stop(handle: &str) -> Result<()> {
     if !shim::is_running(handle) {
         return Ok(());
     }
-    let _ = shim::request(handle, got_vmm::proto::POWEROFF);
+    let _ = shim::request(handle, moo_vmm::proto::POWEROFF);
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(10) {
         if !shim::socket_path(handle).exists() {
@@ -122,7 +122,7 @@ fn sync_after_new(reg: &Registry, name: &str) -> Result<Option<sync::SyncOutcome
     sync::sync_into(&machine)
 }
 
-/// `got new <name> [from <src>]` — idempotent create/restore (plan.md §6.1).
+/// `moo new <name> [from <src>]` — idempotent create/restore (plan.md §6.1).
 pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<NewOutcome> {
     let reg = Registry::open()?;
     std::fs::create_dir_all(machines_dir())?;
@@ -140,7 +140,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
         if let Some(snap) = snap {
             let live_hash_matches = overlay.exists()
                 && !shim::is_running(name)
-                && got_store::content_hash(&overlay)? == snap.content_hash;
+                && moo_store::content_hash(&overlay)? == snap.content_hash;
             if !live_hash_matches {
                 stop(name)?;
                 if overlay.exists() {
@@ -189,10 +189,10 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
                 if let Some(other) = reg.get_machine(src)? {
                     // Fork another machine: quiesce it first (plan.md §5.1).
                     if shim::is_running(src) {
-                        let (code, _) = shim::request(src, got_vmm::proto::QUIESCE)?;
+                        let (code, _) = shim::request(src, moo_vmm::proto::QUIESCE)?;
                         anyhow::ensure!(code == 0, "could not quiesce machine '{}'", src);
                     }
-                    got_store::full_fsync(Path::new(&other.overlay_path))?;
+                    moo_store::full_fsync(Path::new(&other.overlay_path))?;
                     (
                         PathBuf::from(&other.overlay_path),
                         other.base_commit.clone(),
@@ -267,13 +267,13 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
     })
 }
 
-/// `got run <name> -- <cmd>` — execute inside the machine (plan.md §6.2).
+/// `moo run <name> -- <cmd>` — execute inside the machine (plan.md §6.2).
 /// The working tree follows the code: when invoked from the machine's
 /// repository, any host-side change is synced in before the command runs.
 pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
     let reg = Registry::open()?;
     let Some(machine) = reg.get_machine(name)? else {
-        bail!("no machine '{}' — create it with `got new {}`", name, name);
+        bail!("no machine '{}' — create it with `moo new {}`", name, name);
     };
     if !shim::is_running(name) {
         // Machines persist between invocations; reboot the live overlay.
@@ -281,7 +281,7 @@ pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
     }
     if let Some(s) = sync::sync_into(&machine)? {
         eprintln!(
-            "got: synced {} files ({:.1} MB) to {}",
+            "moo: synced {} files ({:.1} MB) to {}",
             s.files,
             s.bytes as f64 / 1e6,
             s.workdir
@@ -295,7 +295,7 @@ pub struct SaveOutcome {
     pub fresh: bool,
 }
 
-/// `got save <name>` — quiesce, snapshot, associate with HEAD (plan.md §6.3).
+/// `moo save <name>` — quiesce, snapshot, associate with HEAD (plan.md §6.3).
 pub fn save_machine(name: &str) -> Result<SaveOutcome> {
     let reg = Registry::open()?;
     let m = reg
@@ -310,14 +310,14 @@ pub fn save_machine(name: &str) -> Result<SaveOutcome> {
             let (code, out) = shim::request(name, cmd.as_bytes())?;
             if code != 0 {
                 eprintln!(
-                    "got: warning: quiesce command failed in '{}' (exit {}): {}",
+                    "moo: warning: quiesce command failed in '{}' (exit {}): {}",
                     name,
                     code,
                     String::from_utf8_lossy(&out).trim()
                 );
             }
         }
-        let (code, out) = shim::request(name, got_vmm::proto::QUIESCE)?;
+        let (code, out) = shim::request(name, moo_vmm::proto::QUIESCE)?;
         if code != 0 {
             bail!(
                 "could not quiesce machine '{}': {}",
@@ -333,7 +333,7 @@ pub fn save_machine(name: &str) -> Result<SaveOutcome> {
     Ok(SaveOutcome { snapshot, fresh })
 }
 
-/// `got save` with no name — save every registered machine.
+/// `moo save` with no name — save every registered machine.
 pub fn save_all() -> Result<Vec<(String, SaveOutcome)>> {
     let reg = Registry::open()?;
     let mut results = Vec::new();
@@ -344,7 +344,7 @@ pub fn save_all() -> Result<Vec<(String, SaveOutcome)>> {
     Ok(results)
 }
 
-/// `got drop <name>` — destroy the live machine; snapshots survive unless
+/// `moo drop <name>` — destroy the live machine; snapshots survive unless
 /// `drop_snapshots` (plan.md §6.4). Idempotent.
 pub fn drop_machine(name: &str, force: bool, drop_snapshots: bool) -> Result<()> {
     let reg = Registry::open()?;
@@ -395,7 +395,7 @@ pub struct LsRow {
     pub snapshots: Vec<Snapshot>,
 }
 
-/// `got ls` — read-only listing.
+/// `moo ls` — read-only listing.
 pub fn list() -> Result<Vec<LsRow>> {
     let reg = Registry::open()?;
     let mut rows = Vec::new();

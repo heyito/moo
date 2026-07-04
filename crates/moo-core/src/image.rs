@@ -1,5 +1,5 @@
 //! Golden base images (plan.md §5): content-addressed by recipe hash,
-//! built once per hash, cached under `~/.got/images/`.
+//! built once per hash, cached under `~/.moo/images/`.
 //!
 //! The WP0-validated pipeline: fetch OCI layers straight from the registry
 //! with anonymous auth (no container daemon), unpack them in order with
@@ -7,27 +7,27 @@
 //! mke2fs -d (no root, no mounting), then restore in-guest file ownership
 //! with a debugfs script (unprivileged extraction loses it).
 
-use crate::config::GotToml;
+use crate::config::MooToml;
 use anyhow::{bail, Context, Result};
-use got_store::images_dir;
+use moo_store::images_dir;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The static guest exec agent, cross-compiled at build time.
-const AGENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/got-agent.bin"));
+const AGENT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/moo-agent.bin"));
 
 pub const DEFAULT_BASE: &str = "debian:bookworm";
 
 /// Return the golden image for this project, building it on first use.
-pub fn ensure(cfg: &GotToml, project_root: &Path) -> Result<PathBuf> {
+pub fn ensure(cfg: &MooToml, project_root: &Path) -> Result<PathBuf> {
     let hash = cfg.recipe_hash(project_root);
     let path = images_dir().join(format!("{}.img", hash));
     if path.exists() {
         return Ok(path);
     }
     let base_ref = cfg.project.base.as_deref().unwrap_or(DEFAULT_BASE);
-    eprintln!("got: building base image from {} (first use for this recipe)", base_ref);
+    eprintln!("moo: building base image from {} (first use for this recipe)", base_ref);
     build(base_ref, &path)?;
     Ok(path)
 }
@@ -184,7 +184,7 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
             bail!("zstd-compressed images are not supported yet: {}", base_ref);
         }
         eprintln!(
-            "got:   layer {}/{} ({:.1} MB)",
+            "moo:   layer {}/{} ({:.1} MB)",
             i + 1,
             layers.len(),
             *size as f64 / 1e6
@@ -196,11 +196,11 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
     }
 
     // Inject the guest agent (runs as the machine's init).
-    let agent_path = rootfs.join("usr/local/bin/got-agent");
+    let agent_path = rootfs.join("usr/local/bin/moo-agent");
     std::fs::create_dir_all(agent_path.parent().unwrap())?;
     std::fs::write(&agent_path, AGENT)?;
     set_mode(&agent_path, 0o755)?;
-    owners.push((PathBuf::from("usr/local/bin/got-agent"), 0, 0));
+    owners.push((PathBuf::from("usr/local/bin/moo-agent"), 0, 0));
 
     // Build the filesystem, then restore in-guest ownership.
     let tmp_img = work.join("image.img");
@@ -211,7 +211,7 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
     std::fs::rename(&tmp_img, out).or_else(|_| {
         std::fs::copy(&tmp_img, out).map(|_| ())
     })?;
-    eprintln!("got: base image ready");
+    eprintln!("moo: base image ready");
     Ok(())
 }
 
@@ -273,7 +273,7 @@ fn apply_layer(
     Ok(())
 }
 
-/// True if the tools needed to build images are present (`got doctor`).
+/// True if the tools needed to build images are present (`moo doctor`).
 pub fn tools_installed() -> bool {
     find_tool("mkfs.ext4").is_ok() && find_tool("debugfs").is_ok()
 }
@@ -289,7 +289,7 @@ fn find_tool(name: &str) -> Result<PathBuf> {
             return Ok(PathBuf::from(c));
         }
     }
-    bail!("{} not found — run `got doctor` for setup instructions", name);
+    bail!("{} not found — run `moo doctor` for setup instructions", name);
 }
 
 fn mkfs(rootfs: &Path, out: &Path) -> Result<()> {
@@ -303,7 +303,7 @@ fn mkfs(rootfs: &Path, out: &Path) -> Result<()> {
         .arg("-d")
         .arg(rootfs)
         .arg("-L")
-        .arg("gotroot")
+        .arg("mooroot")
         .arg(out)
         .arg(format!("{}G", size_gb))
         .status()
@@ -327,7 +327,7 @@ fn fix_ownership(img: &Path, rootfs: &Path, owners: &[(PathBuf, u64, u64)]) -> R
         sweep(path, *uid, *gid);
     }
 
-    let cmdfile = std::env::temp_dir().join(format!("got-debugfs-{}.cmd", std::process::id()));
+    let cmdfile = std::env::temp_dir().join(format!("moo-debugfs-{}.cmd", std::process::id()));
     std::fs::write(&cmdfile, script)?;
     let out = std::process::Command::new(debugfs)
         .arg("-w")
@@ -381,7 +381,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 }
 
 fn tempdir() -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("got-image-build-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("moo-image-build-{}", std::process::id()));
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }

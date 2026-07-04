@@ -1,6 +1,6 @@
-# got — Technical Plan
+# moo — Technical Plan
 
-`got` is a single primitive: a `machine`. A hardware-isolated Linux runtime
+`moo` is a single primitive: a `machine`. A hardware-isolated Linux runtime
 with a copy-on-write disk, descended from a content-addressed golden image,
 identified by a stable user-chosen handle. Four verbs: `new`, `run`, `save`,
 `drop`. Read [vision.md](vision.md) first for the framing.
@@ -25,7 +25,7 @@ We need a single-binary CLI that:
    creation, so a machine is reproducible and inspectable.
 5. Snapshots machine state on demand and associates each snapshot with the
    current git HEAD SHA of the ref the handle shadows, so
-   `git checkout <sha>` + `got new <name>` restores the exact runtime that
+   `git checkout <sha>` + `moo new <name>` restores the exact runtime that
    existed at that commit.
 6. Exposes exactly four verbs to the outside world: `new`, `run`, `save`,
    `drop`. Everything an agent or a developer might want to do composes from
@@ -42,14 +42,14 @@ the discipline to expose nothing else.
 - Native macOS Apple Silicon (primary) and Linux (secondary) via the same
   hypervisor library, no per-platform code paths for the core operations.
 - Sub-second CoW machine forks (APFS `clonefile`, reflink, ZFS).
-- Content-addressed golden image; hash of (base ref + `got.toml` + lockfiles).
+- Content-addressed golden image; hash of (base ref + `moo.toml` + lockfiles).
 - Machine lifecycle independent of git ref/worktree lifecycle; handles are
   user-chosen labels that may or may not shadow git refs.
-- Idempotent `got new` — existing handle returns existing machine or the
+- Idempotent `moo new` — existing handle returns existing machine or the
   snapshot matching the current git HEAD if one is saved.
-- **Commit-associated snapshots.** `got save` quiesces the machine,
-  CoW-clones the overlay to `~/.got/snapshots/<content_hash>`, and records
-  `(handle, head_sha, snapshot_hash)` so `got new <name>` can restore the
+- **Commit-associated snapshots.** `moo save` quiesces the machine,
+  CoW-clones the overlay to `~/.moo/snapshots/<content_hash>`, and records
+  `(handle, head_sha, snapshot_hash)` so `moo new <name>` can restore the
   exact runtime that matched a given commit.
 - **Content-addressed snapshot storage** — byte-identical overlays share the
   same file on disk.
@@ -57,30 +57,30 @@ the discipline to expose nothing else.
   command, config, or error a user sees.
 
 **Non-goals (initially)**
-- General container runtime. `got` is not Docker.
+- General container runtime. `moo` is not Docker.
 - Hosted platform. Local-first; remote-compatible primitives added later.
 - GUI. CLI only.
 - Windows guest support. Linux guests only.
 - Live memory-state migration between hosts.
 - Snapshot push/pull as a first-class network protocol — v-future.
-- `got.toml` as a service graph. No `[[services]]`, `depends_on`, `health`.
-  `got.toml` records the base image reference and build recipe inputs; no
+- `moo.toml` as a service graph. No `[[services]]`, `depends_on`, `health`.
+  `moo.toml` records the base image reference and build recipe inputs; no
   runtime declarations.
 - MCP server as the primary surface. A thin `new`/`run`/`save`/`drop` MCP
   adapter can ship in M2; the primary and only stable surface in v1 is the
   CLI.
-- Reverse proxy or `*.got.test` DNS. Machines expose ports on localhost;
+- Reverse proxy or `*.moo.test` DNS. Machines expose ports on localhost;
   routing is the caller's responsibility.
-- Wrapping any git verb. `got` never runs `git worktree add`, `git switch`,
-  `git commit`, or `git branch`. Git and got are orthogonal by default.
-  Users who want automatic coupling opt in via `got hook install` (§8.1),
-  which places fail-silent hook scripts in `.git/hooks/` that invoke `got`
-  on git checkpoints — reversible with `got hook uninstall`. `got` never
+- Wrapping any git verb. `moo` never runs `git worktree add`, `git switch`,
+  `git commit`, or `git branch`. Git and moo are orthogonal by default.
+  Users who want automatic coupling opt in via `moo hook install` (§8.1),
+  which places fail-silent hook scripts in `.git/hooks/` that invoke `moo`
+  on git checkpoints — reversible with `moo hook uninstall`. `moo` never
   installs hooks itself.
 - Attempt ledgers, egress policies, and secret injection as v1 product
   surfaces. Isolation is enforced by the microVM boundary; policy is a v2+
   concern.
-- Agent-specific verbs (`--agent claude`, `got try spawn`, etc.). Agents
+- Agent-specific verbs (`--agent claude`, `moo try spawn`, etc.). Agents
   compose the four verbs and their own git verbs.
 
 ## 3. MicroVM technology decision
@@ -122,7 +122,7 @@ OpenShell.
 dynamically linked (LGPL-2.1).** We do not build on Microsandbox and do not
 adopt its `msb_krun` Rust fork — both would stack our abstraction on
 another team's abstraction, and the storage/lifecycle primitives that make
-`got` unique need direct control of the C ABI (block-device attach, sync
+`moo` unique need direct control of the C ABI (block-device attach, sync
 mode, CoW clone timing). Microsandbox is a reference implementation we
 learn from — specifically its **OCI → EROFS + VMDK + ext4-overlay rootfs
 conversion** — but we do not depend on it at runtime.
@@ -179,12 +179,12 @@ consumers:
 
 ```
 ┌──────────────────────────────────────────────┐
-│  got CLI  (new / run / save / drop / doctor)  │
+│  moo CLI  (new / run / save / drop / doctor)  │
 ├──────────────────────────────────────────────┤
-│  got-core  (registry, provenance, lifecycle)  │
+│  moo-core  (registry, provenance, lifecycle)  │
 ├──────────────────────────────────────────────┤
-│  got-vmm   (libkrun FFI, exec transport)      │
-│  got-store (SQLite registry, CoW clone,       │
+│  moo-vmm   (libkrun FFI, exec transport)      │
+│  moo-store (SQLite registry, CoW clone,       │
 │             content-addressed snapshots)      │
 └──────────────────────────────────────────────┘
                 │ virtio (blk, net, vsock)
@@ -198,14 +198,14 @@ consumers:
 
 ### 4.1 No daemon
 
-`got` is a single binary. No `gotd`. No system service. Each invocation
+`moo` is a single binary. No `mood`. No system service. Each invocation
 opens the SQLite registry, does the requested operation, and exits.
 Long-running guest VMs are owned by launchd / systemd user services or a
-detached child process, not by a `got` daemon.
+detached child process, not by a `moo` daemon.
 
 ### 4.2 Registry
 
-`~/.got/registry.db` (SQLite) records two tables.
+`~/.moo/registry.db` (SQLite) records two tables.
 
 **Machines** (live runtime handles):
 
@@ -230,7 +230,7 @@ snapshots(snapshot_id, handle, head_sha, snapshot_path,
 - `handle` — the machine handle at save time.
 - `head_sha` — the git HEAD of the ref the handle shadowed at save time.
   Null if the handle was `--detached`.
-- `snapshot_path` — points to `~/.got/snapshots/<content_hash>`.
+- `snapshot_path` — points to `~/.moo/snapshots/<content_hash>`.
 - `content_hash` — hash of overlay bytes. Two snapshots with identical
   content share the file (dedup).
 
@@ -243,24 +243,24 @@ noun.
 
 ### 4.3 Internal driver seam (not public)
 
-Backend abstraction lives in the `got-vmm` crate as a trait with exactly
+Backend abstraction lives in the `moo-vmm` crate as a trait with exactly
 one implementation in v1 (libkrun). The trait exists so that adding
 Firecracker / Cloud Hypervisor / Apple VZ in v2+ (for memory snapshots) is
 a compile-time swap, not a rewrite. The trait is internal — it does not
-appear in the CLI, in `got.toml`, or in any user-visible error message.
+appear in the CLI, in `moo.toml`, or in any user-visible error message.
 
 ## 5. Storage & state
 
 Three artifacts per project:
 
 1. **Golden base image** — content-addressed and read-only. Content hash =
-   `hash(base_image_ref + got.toml + lockfiles)`. Built once per hash;
-   cached under `~/.got/images/<hash>`. If two projects share a hash, they
+   `hash(base_image_ref + moo.toml + lockfiles)`. Built once per hash;
+   cached under `~/.moo/images/<hash>`. If two projects share a hash, they
    share the base.
 2. **Per-machine CoW overlay** — writable. Holds everything that mutates:
    DB data directories, caches, installed packages, uploads, artifacts.
 3. **Immutable snapshots** — CoW clones of an overlay at save time, keyed
-   by content hash under `~/.got/snapshots/<content_hash>`, indexed in the
+   by content hash under `~/.moo/snapshots/<content_hash>`, indexed in the
    registry by `(handle, head_sha)`.
 
 Provenance is recorded in the registry at creation:
@@ -275,8 +275,8 @@ reproducible and inspectable without a separate "ledger" product.
 - **Linux:** `reflink` (btrfs, XFS), ZFS clones, or qcow2 backing files as
   a universal fallback.
 
-**Clone ordering (correctness).** Any CoW clone (both `got new … from
-<name>` and `got save <name>`) must run **quiesce → host-flush
+**Clone ordering (correctness).** Any CoW clone (both `moo new … from
+<name>` and `moo save <name>`) must run **quiesce → host-flush
 (`F_FULLFSYNC`) → `clonefile`**, in that order. Cloning from a `sealed`
 machine skips the quiesce step (already quiesced). Cloning from `live`
 requires an in-guest sync + host flush first, or fails with a clear error.
@@ -284,7 +284,7 @@ requires an in-guest sync + host flush first, or fails with a clear error.
 **Durability boundary.** libkrun's `KRUN_SYNC_RELAXED` means a guest
 `fsync` reaches the host page cache but not the physical drive. Contract
 is "survives switch," not "survives host power-loss." A per-machine
-`sync_mode=full` opt-in exists for volumes that need it. `got save` uses
+`sync_mode=full` opt-in exists for volumes that need it. `moo save` uses
 full sync regardless of the machine's default mode — snapshots must
 survive power loss even if the live overlay does not.
 
@@ -303,10 +303,10 @@ recipes for `node_modules`, `.venv`, build caches) is deferred to M2. It is
 an opt-in adapter for humans who want editor visibility on the host, not
 the default.
 
-### 5.3 Snapshots (`got save`)
+### 5.3 Snapshots (`moo save`)
 
 A snapshot is an immutable CoW clone of a machine's overlay, saved to
-`~/.got/snapshots/<content_hash>` and recorded in the `snapshots` table
+`~/.moo/snapshots/<content_hash>` and recorded in the `snapshots` table
 with `(handle, head_sha, snapshot_hash, saved_at)`.
 
 - **Association.** `head_sha` is the current git HEAD of the ref the
@@ -315,9 +315,9 @@ with `(handle, head_sha, snapshot_hash, saved_at)`.
   share the same file on disk. Most commits move little runtime state, so
   dedup is effective in practice.
 - **Idempotence.** If the latest snapshot for `(handle, head_sha)` already
-  matches the current content hash, `got save` is a no-op and returns the
+  matches the current content hash, `moo save` is a no-op and returns the
   existing snapshot ID.
-- **Snapshot-aware `got new`.** On an existing handle, `got new <name>`
+- **Snapshot-aware `moo new`.** On an existing handle, `moo new <name>`
   first looks up `snapshots WHERE handle = <name> AND head_sha =
   git_current_head(shadowed_ref)`. If found, restore from that snapshot
   (the snapshot is CoW-cloned into a new live overlay). If not found, boot
@@ -331,7 +331,7 @@ with `(handle, head_sha, snapshot_hash, saved_at)`.
 
 The four verbs. Nothing else.
 
-### 6.1 `got new <name> [from <src>] [--detached]`
+### 6.1 `moo new <name> [from <src>] [--detached]`
 
 ```
 new(name, source):
@@ -357,23 +357,23 @@ new(name, source):
   default base image plus `HEAD`.
 - **Snapshot restore.** If `<src>` is a commit SHA and a snapshot exists
   for `(handle_being_created_or_shadowed_ref, commit_sha)`, restore from
-  it. This is what makes `git checkout <old-sha>` + `got new feat/x` work.
+  it. This is what makes `git checkout <old-sha>` + `moo new feat/x` work.
 - **Naming.** `feat/x` **shadows** the ref `refs/heads/feat/x` — attaches
   the handle to whatever HEAD points at now, records `base_commit` at that
   SHA, but does not create or modify any git ref.
 - `--detached` yields an auto-generated handle (`m_a1f3…`), no ref
   shadowing, short auto-GC lease.
 
-### 6.2 `got run <name> -- <cmd>`
+### 6.2 `moo run <name> -- <cmd>`
 
 Executes `<cmd>` inside the machine's guest. Captures stdout, stderr, and
 exit code. Long-running services persist between invocations (`docker exec`
-semantics). Interactive TTY via `got run --tty <name> -- $SHELL` in M2.
+semantics). Interactive TTY via `moo run --tty <name> -- $SHELL` in M2.
 This one verb subsumes `exec`, `ssh`, `logs`, and `doctor`. Idempotent
 from the caller's point of view: each invocation is a fresh process
 against the same machine.
 
-### 6.3 `got save [<name>]`
+### 6.3 `moo save [<name>]`
 
 ```
 save(name):
@@ -386,7 +386,7 @@ save(name):
   if existing and existing.content_hash == content_hash:
       return existing.snapshot_id                # no-op, dedup
   snapshot_path = cow_clone(machine.overlay_path,
-                            f"~/.got/snapshots/{content_hash}")
+                            f"~/.moo/snapshots/{content_hash}")
   snapshot_id = registry.write_snapshot(name, head_sha,
                                         snapshot_path, content_hash)
   return snapshot_id
@@ -403,28 +403,28 @@ save(name):
 - **Idempotence.** If the latest snapshot for `(handle, head_sha)` has a
   matching content hash, no-op and return the existing snapshot ID.
 - **No `<name>`.** Saves every live machine. Useful in a `post-commit`
-  shell alias the user chooses to write themselves. `got` does not
+  shell alias the user chooses to write themselves. `moo` does not
   install git hooks.
-- **Interaction with `got new`.** After `got save feat/x`, if the user
-  runs `git checkout <old-sha>` and then `got new feat/x`, the machine
+- **Interaction with `moo new`.** After `moo save feat/x`, if the user
+  runs `git checkout <old-sha>` and then `moo new feat/x`, the machine
   reboots from the snapshot saved for `(feat/x, old-sha)`. If no such
   snapshot exists, the current live overlay is used.
 
 This is `git commit` for the runtime.
 
-### 6.4 `got drop <name>`
+### 6.4 `moo drop <name>`
 
 Quiesces the machine, stops the VMM, deletes the **live overlay**,
 removes the handle from the `machines` table. **Saved snapshots survive
 by default** — they remain in the `snapshots` table and can be restored
-by a future `got new <name>` if the handle name is reused against a
+by a future `moo new <name>` if the handle name is reused against a
 matching git SHA.
 
 - `--force` — kill even if the machine is live and cannot be quiesced.
 - `--snapshots` — also delete all saved snapshots for this handle.
 - Idempotent.
 
-### 6.5 `got doctor`
+### 6.5 `moo doctor`
 
 Diagnostic-only. Checks HVF entitlements on the binary, `libkrunfw`
 presence, APFS on the store path, `clonefile` support, base image cache,
@@ -436,91 +436,91 @@ snapshot cache integrity. Modifies nothing.
   root, no helper process, no bridge. Each machine's listening ports are
   exposed on host localhost at a stable, project-scoped port allocated
   from a managed range.
-- **Deterministic per-handle port allocation.** `got ls` shows the map.
+- **Deterministic per-handle port allocation.** `moo ls` shows the map.
   Handle collision within the allocated range triggers bind-failure retry,
   not a lease crash.
-- **No reverse proxy. No `*.got.test` DNS.** Machines expose
+- **No reverse proxy. No `*.moo.test` DNS.** Machines expose
   `localhost:<port>`. Routing between them is the caller's job. This
-  removes the `/etc/resolver/*` install friction and keeps `got doctor`
+  removes the `/etc/resolver/*` install friction and keeps `moo doctor`
   from having to manage privileged config.
 
 ## 8. Git integration
 
-`got` never runs git. Git never runs `got`. They are orthogonal.
+`moo` never runs git. Git never runs `moo`. They are orthogonal.
 
-- **Handle shadowing.** `got new feat/x` records the resolved commit at
+- **Handle shadowing.** `moo new feat/x` records the resolved commit at
   creation, but does not create, modify, or delete `refs/heads/feat/x`.
-- **Save.** `got save feat/x` reads `refs/heads/feat/x` HEAD but does not
+- **Save.** `moo save feat/x` reads `refs/heads/feat/x` HEAD but does not
   write to it. No `post-commit` hook is installed; users who want
   automatic save write their own alias (`gitcommit() { git commit "$@" &&
-  got save; }`).
+  moo save; }`).
 - **Promotion.** `git merge <ref>` — the machine follows the promoted ref
   because the handle shadows it, and any snapshot saved for the merge
   commit is restorable.
-- **Rollback.** `got drop <name>` for runtime + `git reset` for code;
+- **Rollback.** `moo drop <name>` for runtime + `git reset` for code;
   snapshots for old SHAs remain and can be restored.
-- **Fanout.** `for i in {1..6}; do got new --detached from HEAD; done` —
+- **Fanout.** `for i in {1..6}; do moo new --detached from HEAD; done` —
   no refs polluted.
 
-**No default hooks. No wrappers. No `got switch`. No `got worktree`.** If a
-user runs `git worktree add`, they created a worktree; they can `got new`
-against it or not. `got` does not know or care.
+**No default hooks. No wrappers. No `moo switch`. No `moo worktree`.** If a
+user runs `git worktree add`, they created a worktree; they can `moo new`
+against it or not. `moo` does not know or care.
 
-### 8.1 Opt-in hooks (`got hook install`)
+### 8.1 Opt-in hooks (`moo hook install`)
 
 Users who want git-triggered auto-follow install hooks via a single admin
-command. This is explicit user consent, not orthogonality violation — got
-itself never runs git and never installs hooks; git only invokes got via
+command. This is explicit user consent, not orthogonality violation — moo
+itself never runs git and never installs hooks; git only invokes moo via
 scripts the user chose to place.
 
 **Admin commands:**
 
-- **`got hook install [--force] [--append]`** — writes hook scripts into
-  `.git/hooks/`. Refuses to overwrite non-got hooks unless `--force`; use
-  `--append` to preserve existing script content and add got-owned lines
-  below a sentinel comment (removable by `got hook uninstall`). Detects
+- **`moo hook install [--force] [--append]`** — writes hook scripts into
+  `.git/hooks/`. Refuses to overwrite non-moo hooks unless `--force`; use
+  `--append` to preserve existing script content and add moo-owned lines
+  below a sentinel comment (removable by `moo hook uninstall`). Detects
   `husky` / `pre-commit` / `lefthook` hook-manager setups and prints
   integration instructions instead of installing directly.
-- **`got hook uninstall`** — removes got-owned hook content. Preserves any
-  non-got content added via `--append` mode.
-- **`got hook status`** — prints which hooks are installed, which are
+- **`moo hook uninstall`** — removes moo-owned hook content. Preserves any
+  non-moo content added via `--append` mode.
+- **`moo hook status`** — prints which hooks are installed, which are
   missing, and which conflict with other tools.
 
 **Hooks installed:**
 
 - **`post-checkout`** — after `git checkout <branch>`, `git switch`, or
-  `git checkout -b`, runs `got save <outgoing-branch>` (if that machine
-  exists), then `got new <incoming-branch>` (which restores the snapshot
+  `git checkout -b`, runs `moo save <outgoing-branch>` (if that machine
+  exists), then `moo new <incoming-branch>` (which restores the snapshot
   matching the incoming HEAD or boots the current live overlay).
-- **`post-commit`** — after `git commit`, runs `got save <current-branch>`,
+- **`post-commit`** — after `git commit`, runs `moo save <current-branch>`,
   tagging the snapshot with the new HEAD SHA. This is what makes
-  `git checkout <old-sha>` + `got new <name>` restore the exact runtime
+  `git checkout <old-sha>` + `moo new <name>` restore the exact runtime
   that matched that commit.
 - **`post-merge`** — after `git merge` or a merge-based `git pull`, runs
-  `got save <current-branch>` followed by `got new <current-branch>` to
+  `moo save <current-branch>` followed by `moo new <current-branch>` to
   refresh runtime against the merged state.
 - **`post-worktree`** (git 2.44+ only) — after `git worktree add`, runs
-  `got new <ref>` in the new worktree's directory.
+  `moo new <ref>` in the new worktree's directory.
 
 **Semantics:**
 
-- All hook actions are **fail-silent**: `got` errors never break `git`.
-- Every hook invocation appends to `~/.got/hooks.log` for debugging.
+- All hook actions are **fail-silent**: `moo` errors never break `git`.
+- Every hook invocation appends to `~/.moo/hooks.log` for debugging.
 - Detached HEAD, missing machines, and machines whose handle does not
   match any branch are all no-ops.
 - The primitive is complete without hooks. Installation is an explicit
-  user action; `got init` and `got new` do not touch git hooks.
+  user action; `moo init` and `moo new` do not touch git hooks.
 
 **Known gaps (documented, not fixed):**
 
 - `git reset --hard`, `git rebase`, and `git cherry-pick` move HEAD
   without firing `post-checkout`. Snapshot-per-commit time-travel still
   works for previously-saved SHAs, but the live overlay does not
-  auto-refresh. Users who need this run `got new <branch>` manually.
+  auto-refresh. Users who need this run `moo new <branch>` manually.
 - Squash-merge and fast-forward pull edge cases in `post-merge` may
   double-save. Idempotent snapshot dedup makes this cheap in practice.
 
-## 9. Configuration: `got.toml`
+## 9. Configuration: `moo.toml`
 
 Optional. Committed to the repo if used. Records the base image reference
 and the recipe inputs whose hash becomes the golden-image identity. Nothing
@@ -539,7 +539,7 @@ cpus = 2
 memory = "4GiB"
 
 [quiesce]                   # optional: extra commands the guest agent runs
-                            # during `got save`, before host flush
+                            # during `moo save`, before host flush
 commands = [
   "pg_ctl -D /var/lib/postgresql/16/main checkpoint",
   "redis-cli BGSAVE",
@@ -549,7 +549,7 @@ commands = [
 No `[[services]]`. No `depends_on`. No `health`. No `[[volumes]]`. No
 `[snapshot]` config beyond `[quiesce]`. The recipe hash is
 `hash(base + recipe.lockfiles content + resource block)`. If two developers
-have the same `got.toml` and the same lockfile contents, they get the same
+have the same `moo.toml` and the same lockfile contents, they get the same
 golden image, byte-for-byte.
 
 ## 10. CLI surface
@@ -559,31 +559,31 @@ Five commands (four verbs plus `doctor`; `ls` is a read-only listing).
 Primitive verbs (compose):
 
 ```
-got new <name> [from <src>] [--detached]      # create machine (restore snapshot if available)
-got run <name> -- <cmd>                       # exec inside machine
-got save [<name>]                             # snapshot state, tag with current HEAD SHA
-got drop <name> [--force] [--snapshots]       # destroy machine (snapshots survive by default)
+moo new <name> [from <src>] [--detached]      # create machine (restore snapshot if available)
+moo run <name> -- <cmd>                       # exec inside machine
+moo save [<name>]                             # snapshot state, tag with current HEAD SHA
+moo drop <name> [--force] [--snapshots]       # destroy machine (snapshots survive by default)
 ```
 
 Admin (do not compose; parallel to `docker system prune`, `git config`):
 
 ```
-got doctor                                    # diagnostic check
-got ls                                        # list handles and their snapshots
-got hook install [--force] [--append]         # opt-in: install git hooks (§8.1)
-got hook uninstall                            # remove got-owned hook content
-got hook status                               # show hook installation state
+moo doctor                                    # diagnostic check
+moo ls                                        # list handles and their snapshots
+moo hook install [--force] [--append]         # opt-in: install git hooks (§8.1)
+moo hook uninstall                            # remove moo-owned hook content
+moo hook status                               # show hook installation state
 ```
 
-`got ls`, `got doctor`, and `got hook *` are administrative — they do not
+`moo ls`, `moo doctor`, and `moo hook *` are administrative — they do not
 compose with the primitive verbs and do not count against the four-verb
 ceiling. Every user-facing operation on machine state goes through `new`,
 `run`, `save`, `drop`, and git.
 
 ## 11. Technology stack
 
-- **Language.** Rust. Cargo workspace: `crates/got-cli`, `crates/got-core`,
-  `crates/got-vmm`, `crates/got-store`.
+- **Language.** Rust. Cargo workspace: `crates/moo-cli`, `crates/moo-core`,
+  `crates/moo-vmm`, `crates/moo-store`.
 - **libkrun binding.** FFI to the upstream C ABI, pinned to `stable-1.19.x`.
   Disk via `krun_add_disk2/3`. Runtime feature check via
   `krun_has_feature`. No `msb_krun` fork.
@@ -592,15 +592,15 @@ ceiling. Every user-facing operation on machine state goes through `new`,
   + `com.apple.security.cs.disable-library-validation`. Dynamically links
   `libkrun.dylib` (LGPL-2.1). No root.
 - **Guest exec + quiesce agent.** Small static Rust binary baked into the
-  golden image. Handles both command execution (for `got run`) and quiesce
-  orchestration (for `got save`). Transport (vsock vs virtio-serial)
+  golden image. Handles both command execution (for `moo run`) and quiesce
+  orchestration (for `moo save`). Transport (vsock vs virtio-serial)
   decided in M0.
 - **Registry.** SQLite via `rusqlite`. Two tables: `machines`, `snapshots`.
 - **Snapshot store.** Content-addressed directory
-  `~/.got/snapshots/<content_hash>`. CoW clones via `clonefile`/reflink.
+  `~/.moo/snapshots/<content_hash>`. CoW clones via `clonefile`/reflink.
 - **Image build.** Accept an OCI reference or a Dockerfile; convert to a
   bootable rootfs. Port Microsandbox's EROFS + VMDK + ext4-overlay design.
-  Build orchestration decision (external OCI builder vs a `got`-owned build
+  Build orchestration decision (external OCI builder vs a `moo`-owned build
   microVM) is an M0 fork.
 
 ## 12. Phased roadmap
@@ -617,7 +617,7 @@ Prove the primitive is buildable, not build it.
   the exec + quiesce channel.
 - OCI → bootable rootfs conversion decision: port Microsandbox's design vs
   shell to an external builder.
-- End-to-end `got new HEAD --detached` on a codesigned macOS binary,
+- End-to-end `moo new HEAD --detached` on a codesigned macOS binary,
   unprivileged, in one command.
 - **Snapshot spike:** validate quiesce → `F_FULLFSYNC` → `clonefile` +
   content-hash storage produces a byte-stable, restorable overlay.
@@ -630,7 +630,7 @@ stderr, or usage output.
 
 ### M1 — Ship the primitive (macOS Apple Silicon only)
 
-`got new` / `run` / `save` / `drop` / `doctor`. Model B only. libkrun only.
+`moo new` / `run` / `save` / `drop` / `doctor`. Model B only. libkrun only.
 
 - SQLite registry schema per §4.2 (both tables).
 - Content-addressed image cache.
@@ -638,31 +638,31 @@ stderr, or usage output.
 - Idempotent `new` with snapshot restore for current HEAD SHA.
 - Handle shadowing of git refs (no ref modification).
 - CoW clone with quiesce → flush → clonefile ordering.
-- **`got save` with content-addressed snapshot storage, dedup, and
+- **`moo save` with content-addressed snapshot storage, dedup, and
   idempotence.** Guest quiesce agent supports `sync`, Postgres checkpoint,
-  SQLite WAL checkpoint, custom `[quiesce] commands` from `got.toml`.
-- **`got hook install/uninstall/status`** — opt-in `post-checkout`,
+  SQLite WAL checkpoint, custom `[quiesce] commands` from `moo.toml`.
+- **`moo hook install/uninstall/status`** — opt-in `post-checkout`,
   `post-commit`, `post-merge`, and `post-worktree` (git 2.44+) hooks
   that auto-save the outgoing branch and auto-restore the incoming
   branch. Fail-silent; reversible; detects `husky`/`pre-commit`/`lefthook`
   and prints integration instructions instead of clobbering.
 - TSI port allocation with bind-failure retry.
-- `got doctor` diagnostic-only.
+- `moo doctor` diagnostic-only.
 
-**Not in M1:** MCP server, reverse proxy, `*.got.test` DNS, `got.toml`
+**Not in M1:** MCP server, reverse proxy, `*.moo.test` DNS, `moo.toml`
 service graph, attempt ledger, egress policy, secrets injection, `--tty`,
 Model A, Linux, snapshot push/pull, snapshot GC policy.
 
 **Delivers:** a developer or agent can create a machine, run migrations
-and services inside it, `got save` at commit boundaries, fork it
-CoW-cheap, restore old runtimes via `git checkout` + `got new`, and drop
+and services inside it, `moo save` at commit boundaries, fork it
+CoW-cheap, restore old runtimes via `git checkout` + `moo new`, and drop
 it — using only four verbs and existing git.
 
 ### M2 — Adopters
 
 - Thin MCP adapter exposing `new`/`run`/`save`/`drop` as MCP tools.
 - Linux (libkrun + KVM).
-- `got run --tty` for interactive sessions.
+- `moo run --tty` for interactive sessions.
 - Model A: virtio-fs host-share with per-ecosystem overlay recipes for
   `node_modules`, `.venv`, build caches. Opt-in per project.
 - Snapshot GC policy (last-N-per-handle, expire-after-M-days for
@@ -684,11 +684,11 @@ it — using only four verbs and existing git.
 |---|---|---|
 | Feature creep back to a service graph / MCP-first / ledger | The primitive dies before it ships | The hyperplan MUST-NOT list is the design gate; every added feature must decompose into the four verbs or be rejected |
 | libkrun ABI churn | Rebuild breakage | Pin `stable-1.19.x`; runtime `krun_has_feature`; do not depend on 2.0 until it stabilizes |
-| macOS codesigning / entitlement friction | Install-time bounce | `got doctor` catches missing entitlements; Homebrew formula runs the ad-hoc codesign post-install |
+| macOS codesigning / entitlement friction | Install-time bounce | `moo doctor` catches missing entitlements; Homebrew formula runs the ad-hoc codesign post-install |
 | Model A composition problem | Silently broken headline promise | Model B is v1 default; Model A blocked until per-ecosystem overlay recipes exist and are tested |
-| Snapshot storage bloat | Disk fills | Content-addressed dedup keeps marginal cost low; v2 adds retention policy; `got drop --snapshots` is the manual knob |
-| Snapshot restore vs live overlay confusion | Users lose recent unsaved work when `got new` restores an older snapshot | Restore semantics documented sharply: `got new` on existing handle prefers snapshot-for-current-HEAD; users are told to `got save` before switching commits |
-| macOS relaxed fsync on live overlay | Committed writes lost on power-loss | Contract = "survives switch"; `got save` uses full sync regardless; opt-in `sync_mode=full` per volume for the live overlay |
+| Snapshot storage bloat | Disk fills | Content-addressed dedup keeps marginal cost low; v2 adds retention policy; `moo drop --snapshots` is the manual knob |
+| Snapshot restore vs live overlay confusion | Users lose recent unsaved work when `moo new` restores an older snapshot | Restore semantics documented sharply: `moo new` on existing handle prefers snapshot-for-current-HEAD; users are told to `moo save` before switching commits |
+| macOS relaxed fsync on live overlay | Committed writes lost on power-loss | Contract = "survives switch"; `moo save` uses full sync regardless; opt-in `sync_mode=full` per volume for the live overlay |
 | Backend leak into public surface | Loses "backend-neutral" invariant | CI check: grep of CLI stdout/stderr/usage for `libkrun`/`HVF`/`krunfw` returns 0 |
 | libkrun has no memory snapshots | No instant live-resume in v1 | Save is a **disk-state** snapshot with quiesce; memory-state snapshots come from alternate drivers in M3+ |
 
@@ -701,7 +701,7 @@ it — using only four verbs and existing git.
 - Snapshot content-hash algorithm: BLAKE3 for speed vs SHA-256 for
   ubiquity. Decide in M0 based on measured overhead on a 20 GB overlay.
 - Base image cache eviction policy. Content-hash addressed but disk fills.
-  Simple LRU vs explicit `got image prune`.
+  Simple LRU vs explicit `moo image prune`.
 
 ## 15. Summary of decisions
 
@@ -722,15 +722,15 @@ it — using only four verbs and existing git.
 4. **Storage default.** Model B (code inside machine overlay) in v1. Model
    A (virtio-fs host-share) deferred to M2 with per-ecosystem overlay
    recipes.
-5. **Git relationship.** Orthogonal by default. `got` never runs git; git
-   never runs `got` unless the user opts into `got hook install`, which
+5. **Git relationship.** Orthogonal by default. `moo` never runs git; git
+   never runs `moo` unless the user opts into `moo hook install`, which
    places fail-silent hook scripts in `.git/hooks/` for auto-follow on
    checkout, commit, merge, and worktree events. Handles shadow refs
    without modifying them. Promotion is `git merge`.
-6. **No daemon.** `got` is a single binary. Registry is SQLite.
+6. **No daemon.** `moo` is a single binary. Registry is SQLite.
 7. **Networking.** TSI + `krun_set_port_map`. No reverse proxy. No DNS.
    Ports on localhost.
-8. **Configuration.** `got.toml` records base image ref + recipe inputs +
+8. **Configuration.** `moo.toml` records base image ref + recipe inputs +
    optional `[quiesce]` commands. No services, no health checks, no
    volumes, no snapshot config. Recipe hash is the golden-image identity.
 9. **Verb-count discipline.** Four *primitive* verbs (`new`/`run`/`save`/

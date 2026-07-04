@@ -3,17 +3,17 @@ resolver = "2"
 members = [
     "crates/spike",
     "crates/guest-agent",
-    "crates/got-vmm",
-    "crates/got-store",
-    "crates/got-core",
-    "crates/got-cli",
+    "crates/moo-vmm",
+    "crates/moo-store",
+    "crates/moo-core",
+    "crates/moo-cli",
 ]
 default-members = [
     "crates/spike",
-    "crates/got-vmm",
-    "crates/got-store",
-    "crates/got-core",
-    "crates/got-cli",
+    "crates/moo-vmm",
+    "crates/moo-store",
+    "crates/moo-core",
+    "crates/moo-cli",
 ]
 
 [workspace.package]

@@ -13,26 +13,26 @@ extern "C" {
     fn clonefile(src: *const c_char, dst: *const c_char, flags: u32) -> i32;
 }
 
-/// Root of all got state on this host (`~/.got`).
-pub fn got_home() -> PathBuf {
+/// Root of all moo state on this host (`~/.moo`).
+pub fn moo_home() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME not set");
-    Path::new(&home).join(".got")
+    Path::new(&home).join(".moo")
 }
 
 pub fn machines_dir() -> PathBuf {
-    got_home().join("machines")
+    moo_home().join("machines")
 }
 
 pub fn snapshots_dir() -> PathBuf {
-    got_home().join("snapshots")
+    moo_home().join("snapshots")
 }
 
 pub fn images_dir() -> PathBuf {
-    got_home().join("images")
+    moo_home().join("images")
 }
 
 pub fn runtime_dir() -> PathBuf {
-    got_home().join("run")
+    moo_home().join("run")
 }
 
 /// CoW-clone `src` to `dst`. Fails if `dst` exists.
@@ -124,10 +124,10 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Open (creating if needed) the registry at `~/.got/registry.db`.
+    /// Open (creating if needed) the registry at `~/.moo/registry.db`.
     pub fn open() -> Result<Self> {
-        std::fs::create_dir_all(got_home()).context("create ~/.got")?;
-        let conn = Connection::open(got_home().join("registry.db"))?;
+        std::fs::create_dir_all(moo_home()).context("create ~/.moo")?;
+        let conn = Connection::open(moo_home().join("registry.db"))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS machines (
                  handle          TEXT PRIMARY KEY,

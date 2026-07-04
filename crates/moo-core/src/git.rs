@@ -1,4 +1,4 @@
-//! Read-only git queries. `got` never writes to git (plan.md §8).
+//! Read-only git queries. `moo` never writes to git (plan.md §8).
 
 use std::process::Command;
 

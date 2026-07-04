@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 const DISK_FORMAT_RAW: u32 = 0;
 const SYNC_MODE_RELAXED: u32 = 1;
 const AGENT_VSOCK_PORT: u32 = 1024;
-const SERIAL_PORT_NAME: &str = "got-exec";
+const SERIAL_PORT_NAME: &str = "moo-exec";
 
 #[link(name = "krun")]
 extern "C" {
@@ -311,7 +311,7 @@ fn boot_and_run(disk: &str, argv: &[String]) -> (i32, f64) {
 /// Boot the machine, run argv, capture console output to a file and return it.
 /// Used to verify guest-side state honestly (exit codes don't propagate).
 fn boot_and_capture(disk: &str, argv: &[String]) -> (String, f64) {
-    let log = format!("/tmp/got-spike-capture-{}.log", std::process::id());
+    let log = format!("/tmp/moo-spike-capture-{}.log", std::process::id());
     let _ = std::fs::remove_file(&log);
     let t = Instant::now();
     let pid = spawn_machine(disk, argv, None, Some(&log));
@@ -327,7 +327,7 @@ fn sh(cmd: &str) -> Vec<String> {
 }
 
 fn agent_argv(mode: &str) -> Vec<String> {
-    vec!["/usr/local/bin/got-agent".into(), mode.into()]
+    vec!["/usr/local/bin/moo-agent".into(), mode.into()]
 }
 
 // ---- framed exec protocol (host side) ----
@@ -373,7 +373,7 @@ fn vsock_exec(sock: &str, cmd: &[u8]) -> std::io::Result<(u8, Vec<u8>)> {
 }
 
 fn cmd_vsock_bench(base: &str, n: usize) {
-    let sock = "/tmp/got-spike-exec.sock";
+    let sock = "/tmp/moo-spike-exec.sock";
     let _ = std::fs::remove_file(sock);
     let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
     let disk = format!("{}/bench-vsock.img", dir);
@@ -384,12 +384,12 @@ fn cmd_vsock_bench(base: &str, n: usize) {
         &disk,
         &agent_argv("--vsock"),
         Some(AgentTransport::Vsock { host_sock: sock.into() }),
-        Some("/tmp/got-spike-console.log"),
+        Some("/tmp/moo-spike-console.log"),
     );
 
     // Wait until the agent answers its first exec (includes boot time).
-    // Optional initial delay (GOT_SPIKE_DELAY_MS) to rule out poll artifacts.
-    if let Ok(delay) = env::var("GOT_SPIKE_DELAY_MS") {
+    // Optional initial delay (MOO_SPIKE_DELAY_MS) to rule out poll artifacts.
+    if let Ok(delay) = env::var("MOO_SPIKE_DELAY_MS") {
         std::thread::sleep(Duration::from_millis(delay.parse().unwrap()));
     }
     let mut ready_ms = None;
@@ -451,7 +451,7 @@ fn cmd_serial_bench(base: &str, n: usize) {
         &disk,
         &agent_argv("--serial"),
         Some(AgentTransport::Serial { input_fd: h2g[0], output_fd: g2h[1] }),
-        Some("/tmp/got-spike-console.log"),
+        Some("/tmp/moo-spike-console.log"),
     );
 
     // Parent keeps the far ends.
@@ -519,7 +519,7 @@ fn cmd_parallel(base: &str, n: usize) {
             &disk,
             &agent_argv("--serial"),
             Some(AgentTransport::Serial { input_fd: h2g[0], output_fd: g2h[1] }),
-            Some(&format!("/tmp/got-spike-par-{}.log", i)),
+            Some(&format!("/tmp/moo-spike-par-{}.log", i)),
         );
         unsafe {
             libc::close(h2g[0]);
@@ -707,7 +707,7 @@ fn cmd_killgate(base: &str) {
     println!("[1] fork live overlay from base       {:>8.1} ms", clone_ms);
 
     // 2. Boot it and mutate state (write a marker file).
-    let (code, boot1_ms) = boot_and_run(&work, &sh("echo got-was-here > /marker && sync"));
+    let (code, boot1_ms) = boot_and_run(&work, &sh("echo moo-was-here > /marker && sync"));
     if code != 0 {
         eprintln!("error: state mutation run exited {}", code);
         exit(1);
@@ -733,7 +733,7 @@ fn cmd_killgate(base: &str) {
     let (out, boot2_ms) = boot_and_capture(&restored, &sh("cat /marker"));
     println!("[4] restore clone                     {:>8.1} ms", restore_ms);
     println!("[5] boot restored + verify state      {:>8.1} ms", boot2_ms);
-    if !out.contains("got-was-here") {
+    if !out.contains("moo-was-here") {
         eprintln!("FAIL: restored machine is missing the saved state");
         exit(1);
     }

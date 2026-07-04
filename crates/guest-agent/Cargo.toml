@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [[bin]]
-name = "got-agent"
+name = "moo-agent"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]

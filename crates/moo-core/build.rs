@@ -34,6 +34,6 @@ fn main() {
     let built = target_dir
         .join("aarch64-unknown-linux-musl")
         .join("release")
-        .join("got-agent");
-    std::fs::copy(&built, out_dir.join("got-agent.bin")).expect("copy agent binary");
+        .join("moo-agent");
+    std::fs::copy(&built, out_dir.join("moo-agent.bin")).expect("copy agent binary");
 }

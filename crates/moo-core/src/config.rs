@@ -1,4 +1,4 @@
-//! `got.toml` — the project configuration (plan.md §9). Records the base
+//! `moo.toml` — the project configuration (plan.md §9). Records the base
 //! image reference and the recipe inputs whose hash becomes the golden-image
 //! identity, plus resources, exposed ports, and quiesce commands. No
 //! services, no health checks, no volumes.
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GotToml {
+pub struct MooToml {
     #[serde(default)]
     pub project: Project,
     #[serde(default)]
@@ -68,7 +68,7 @@ pub struct Network {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Quiesce {
-    /// Extra commands the guest runs during `got save`, before host flush.
+    /// Extra commands the guest runs during `moo save`, before host flush.
     #[serde(default)]
     pub commands: Vec<String>,
 }
@@ -76,7 +76,7 @@ pub struct Quiesce {
 pub const DEFAULT_CPUS: u8 = 2;
 pub const DEFAULT_RAM_MIB: u32 = 4096;
 
-impl GotToml {
+impl MooToml {
     pub fn cpus(&self) -> u8 {
         self.resources.cpus.unwrap_or(DEFAULT_CPUS)
     }
@@ -129,16 +129,16 @@ pub fn project_root() -> PathBuf {
     crate::git::toplevel().unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Load `got.toml` from the project root. Absent file = all defaults.
-pub fn load() -> Result<(GotToml, PathBuf)> {
+/// Load `moo.toml` from the project root. Absent file = all defaults.
+pub fn load() -> Result<(MooToml, PathBuf)> {
     let root = project_root();
-    let path = root.join("got.toml");
+    let path = root.join("moo.toml");
     if !path.exists() {
-        return Ok((GotToml::default(), root));
+        return Ok((MooToml::default(), root));
     }
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("read {}", path.display()))?;
-    let cfg: GotToml = toml::from_str(&raw)
+    let cfg: MooToml = toml::from_str(&raw)
         .with_context(|| format!("parse {}", path.display()))?;
     Ok((cfg, root))
 }

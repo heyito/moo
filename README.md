@@ -1,20 +1,20 @@
-# got
+# moo
 
-> **Git versions files. `got` versions the machine.**
+> **Git versions files. `moo` versions the machine.**
 
-`got` gives every git branch, worktree, or agent attempt its own
+`moo` gives every git branch, worktree, or agent attempt its own
 hardware-isolated Linux machine — database, ports, packages, services and
 all — with the machine's state **saved per commit and restored by
 `git checkout`**.
 
 ```
-$ got new feat/billing                       # a machine for this branch
-$ got run feat/billing -- npm run migrate    # migration applied inside it
+$ moo new feat/billing                       # a machine for this branch
+$ moo run feat/billing -- npm run migrate    # migration applied inside it
 $ git commit -am "add billing migration"
-$ got save feat/billing                      # runtime snapshot, tagged with the commit
+$ moo save feat/billing                      # runtime snapshot, tagged with the commit
 
 $ git checkout HEAD^                         # rewind the code…
-$ got new feat/billing                       # …and the machine follows.
+$ moo new feat/billing                       # …and the machine follows.
                                              # the migration is gone; state matches code
 ```
 
@@ -29,11 +29,11 @@ time: `git worktree` isolates *files*, but the database, the ports, the
 common workaround is a five-tool stack — worktrees + a port-offset script +
 `.env` symlinks + a DB-per-branch tool + `docker compose -p` hacks.
 
-`got` replaces the stack with one motion:
+`moo` replaces the stack with one motion:
 
 ```
 $ git worktree add ../app-agent-b -b agent/b
-$ got new agent-b
+$ moo new agent-b
 ```
 
 Each machine is a full Linux microVM with copy-on-write state. Six machines
@@ -49,21 +49,21 @@ Requirements: Apple Silicon Mac, [Homebrew](https://brew.sh),
 background except your machines.
 
 ```
-$ git clone <this repo> && cd got
+$ git clone <this repo> && cd moo
 $ scripts/install.sh
 ```
 
 The script installs the isolation runtime and filesystem tools via
-Homebrew, builds and signs the binary, and finishes with `got doctor` —
+Homebrew, builds and signs the binary, and finishes with `moo doctor` —
 four green checks and you're ready.
 
 ## The four verbs
 
 ```
-got new <name> [from <src>] [--detached]   create or restore a machine
-got run <name> -- <cmd> [args...]          execute inside the machine
-got save [<name>]                          snapshot state, tagged with the current commit
-got drop <name> [--force] [--snapshots]    destroy the machine (snapshots survive)
+moo new <name> [from <src>] [--detached]   create or restore a machine
+moo run <name> -- <cmd> [args...]          execute inside the machine
+moo save [<name>]                          snapshot state, tagged with the current commit
+moo drop <name> [--force] [--snapshots]    destroy the machine (snapshots survive)
 ```
 
 - **`new`** is idempotent, like `git checkout`. If a snapshot exists for the
@@ -87,23 +87,23 @@ got drop <name> [--force] [--snapshots]    destroy the machine (snapshots surviv
 - **`drop`** destroys the live machine. Saved snapshots survive unless you
   pass `--snapshots`.
 
-Admin, read-only: `got ls` (machines, ports, snapshots), `got doctor`
+Admin, read-only: `moo ls` (machines, ports, snapshots), `moo doctor`
 (host checks).
 
 ## Restore semantics — read this once
 
-`got new <name>` on an existing handle **prefers the snapshot saved for the
+`moo new <name>` on an existing handle **prefers the snapshot saved for the
 current commit** over the live overlay. That is the whole point — the
 runtime follows the code — but it means unsaved runtime work is replaced
 when you switch commits. The rule of thumb is the same as git's:
-**`got save` before you `git checkout`**, the way you `git commit` before
+**`moo save` before you `git checkout`**, the way you `git commit` before
 you switch branches. A shell alias makes it automatic:
 
 ```sh
-gitcommit() { git commit "$@" && got save; }
+gitcommit() { git commit "$@" && moo save; }
 ```
 
-## Configuration (`got.toml`, optional)
+## Configuration (`moo.toml`, optional)
 
 Committed to the repo if used. This is the whole schema — there are no
 service graphs, health checks, or volumes:
@@ -121,7 +121,7 @@ cpus = 2
 memory = "4GiB"
 
 [network]
-ports = [5432, 3000]         # guest ports; each gets a stable host port (got ls shows the map)
+ports = [5432, 3000]         # guest ports; each gets a stable host port (moo ls shows the map)
 
 [quiesce]
 commands = [                 # run inside the guest before every save
@@ -136,25 +136,25 @@ one image.
 
 ## What it's for
 
-- **Time travel.** `git checkout <old-sha>` + `got new <name>` boots the
+- **Time travel.** `git checkout <old-sha>` + `moo new <name>` boots the
   exact runtime that existed at that commit.
 - **Runtime-dependent bisects.** Bugs that only reproduce against a
   specific migration state become bisectable:
 
 ```
 $ git bisect start bad-sha good-sha
-$ git bisect run bash -c 'got new probe && got run probe -- npm test'
+$ git bisect run bash -c 'moo new probe && moo run probe -- npm test'
 ```
 
 - **Parallel agents, zero collisions.** Every attempt gets its own DB,
   ports, packages, and services:
 
 ```
-$ for name in a b c; do got new agent-$name from HEAD; done
+$ for name in a b c; do moo new agent-$name from HEAD; done
 ```
 
 - **Fork-and-promote.** Fork a machine, let an agent work, `git merge` the
-  winner, `got drop` the losers.
+  winner, `moo drop` the losers.
 
 ## Contracts and limitations
 
@@ -166,14 +166,14 @@ $ for name in a b c; do got new agent-$name from HEAD; done
   host's. Host services are not reachable from the guest's loopback, and
   two machines never share network state.
 - **Ports.** Guest TCP services listed in `[network] ports` are reachable
-  on host localhost at the port shown by `got ls`. Like containers, a
+  on host localhost at the port shown by `moo ls`. Like containers, a
   service must listen on a non-loopback address (`0.0.0.0`) to be
   reachable from the host. TCP half-close is not proxied faithfully —
   plain request/response protocols (HTTP etc.) are unaffected.
 - **Platform.** macOS Apple Silicon hosts, Linux guests (arm64). Linux
   host support is planned.
 - `git reset --hard` and `git rebase` move HEAD without any hook — the
-  machine doesn't auto-follow; run `got new <name>` afterwards.
+  machine doesn't auto-follow; run `moo new <name>` afterwards.
 
 ## See it work
 
