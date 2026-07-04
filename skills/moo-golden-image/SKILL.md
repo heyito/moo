@@ -54,6 +54,10 @@ minutes depending on image size.
 
 ## Step 3: Provision inside the machine
 
+For the common case — compilers, developer CLIs, database clients,
+Node.js, headless Chromium — run `scripts/agent-base.sh base` from the
+moo repository and skip to the project-specific parts below.
+
 `moo new base` already synced the working tree to the guest workdir.
 Install the project's runtime **inside** the machine, not on the host.
 Everything runs as root in the guest:

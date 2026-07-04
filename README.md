@@ -105,6 +105,13 @@ around in. The desktop is part of the machine's state: forks of the
 machine get their own desktop on their own port, and `moo new` after a
 `git checkout` boots the desktop exactly as it was at that commit.
 
+Similarly, `scripts/agent-base.sh` provisions a machine with the common
+agent toolkit — compilers, developer CLIs, database clients, Node.js,
+and a headless-capable Chromium — and snapshots it, so
+`moo new agent-1 from base` forks a fully equipped machine in under a
+second. Run both scripts against the same machine and the desktop gets
+a working browser.
+
 ## Restore semantics — read this once
 
 `moo new <name>` on an existing handle **prefers the snapshot saved for the
