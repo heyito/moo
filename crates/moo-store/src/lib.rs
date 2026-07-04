@@ -128,6 +128,12 @@ impl Registry {
     pub fn open() -> Result<Self> {
         std::fs::create_dir_all(moo_home()).context("create ~/.moo")?;
         let conn = Connection::open(moo_home().join("registry.db"))?;
+        // Many machines are created/saved/dropped in parallel (one CLI
+        // process each). WAL lets readers proceed under a writer, and the
+        // busy timeout makes concurrent writers queue instead of failing
+        // with "database is locked".
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS machines (
                  handle          TEXT PRIMARY KEY,
