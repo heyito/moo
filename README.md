@@ -90,6 +90,21 @@ moo drop <name> [--force] [--snapshots]    destroy the machine (snapshots surviv
 Admin, read-only: `moo ls` (machines, ports, snapshots), `moo doctor`
 (host checks).
 
+## A clickable desktop (optional)
+
+Machines are headless, but they are full Linux systems — a desktop is
+just packages plus a port. With `ports = [6901]` in `moo.toml`:
+
+```
+$ scripts/desktop.sh my-machine
+```
+
+installs XFCE + VNC + a browser client inside the machine, starts it on
+every boot, saves a snapshot, and prints a `localhost` URL you can click
+around in. The desktop is part of the machine's state: forks of the
+machine get their own desktop on their own port, and `moo new` after a
+`git checkout` boots the desktop exactly as it was at that commit.
+
 ## Restore semantics — read this once
 
 `moo new <name>` on an existing handle **prefers the snapshot saved for the
