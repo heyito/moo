@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "moo-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "moo-core",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "moo-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "moo-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -467,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "moo-vmm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
