@@ -11,6 +11,9 @@
 # Usage: install.sh [prefix]   (default prefix: /opt/homebrew/bin)
 set -eu
 
+# Keep brew fast and deterministic: no implicit self-update, no prompts.
+export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 NONINTERACTIVE=1
+
 REPO="heyito/moo"
 ASSET="moo-aarch64-apple-darwin.tar.gz"
 PREFIX="${1:-/opt/homebrew/bin}"
