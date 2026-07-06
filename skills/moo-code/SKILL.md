@@ -15,6 +15,8 @@ moo run <name> -- <cmd> [args...]          execute inside (docker-exec semantics
 moo save [<name>]                          snapshot, tagged with current commit
 moo drop <name> [--force] [--snapshots]    destroy machine (snapshots survive)
 moo ls                                     machines, host->guest port map, snapshots
+moo open <name> [guest-port] [/path]       print + open the host URL for a
+                                           forwarded guest port in the browser
 ```
 
 ## Starting an issue
@@ -91,10 +93,11 @@ its own stable host port per declared guest port (see `moo ls`).
 - Services started in a machine keep running between `moo run` calls.
   Start them with `nohup … &` inside the command.
 - Reach guest services from the host at `localhost:<host-port>` from
-  `moo ls`. A service must listen on `0.0.0.0` (not only loopback) to be
-  reachable from the host — the same rule as containers. Plain
-  request/response protocols (HTTP) work; TCP half-close is not proxied
-  faithfully.
+  `moo ls`, or let `moo open <name> <guest-port>` resolve the mapping and
+  open the browser for you. A service must listen on `0.0.0.0` (not only
+  loopback) to be reachable from the host — the same rule as containers.
+  Plain request/response protocols (HTTP) work; TCP half-close is not
+  proxied faithfully.
 - The machine's loopback is private: `localhost` inside the machine is
   the machine's own, never the host's, and machines never see each other.
 - A stopped machine reboots automatically on the next `moo run`.

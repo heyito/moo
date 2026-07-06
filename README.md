@@ -87,8 +87,15 @@ moo drop <name> [--force] [--snapshots]    destroy the machine (snapshots surviv
 - **`drop`** destroys the live machine. Saved snapshots survive unless you
   pass `--snapshots`.
 
-Admin, read-only: `moo ls` (machines, ports, snapshots), `moo doctor`
-(host checks).
+Admin, read-only: `moo ls` (machines, ports, snapshots), `moo open <name>
+[guest-port] [/path]` (print and open the host URL for a forwarded guest
+port in the browser — the port is optional when the machine forwards
+exactly one), `moo doctor` (host checks).
+
+```
+$ moo open feat/billing 3000            # -> http://localhost:24817/
+$ moo open desktop 6901 '/vnc.html?autoconnect=true'
+```
 
 ## A clickable desktop (optional)
 
@@ -101,7 +108,13 @@ $ scripts/desktop.sh my-machine
 
 installs XFCE + VNC + a browser client inside the machine, starts it on
 every boot, saves a snapshot, and prints a `localhost` URL you can click
-around in. The desktop is part of the machine's state: forks of the
+around in. Reopen it any time with:
+
+```
+$ moo open my-machine 6901 '/vnc.html?autoconnect=true&resize=scale'
+```
+
+The desktop is part of the machine's state: forks of the
 machine get their own desktop on their own port, and `moo new` after a
 `git checkout` boots the desktop exactly as it was at that commit.
 

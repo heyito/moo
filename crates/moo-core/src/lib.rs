@@ -406,3 +406,57 @@ pub fn list() -> Result<Vec<LsRow>> {
     }
     Ok(rows)
 }
+
+/// `moo open` — resolve the host port forwarded to a machine's guest port
+/// (admin, read-only; plan.md §10). With no guest port, resolves only when
+/// the machine forwards exactly one port.
+pub fn resolve_host_port(name: &str, guest_port: Option<u16>) -> Result<u16> {
+    let reg = Registry::open()?;
+    let m = reg
+        .get_machine(name)?
+        .with_context(|| format!("no machine '{}' — create it with `moo new {}`", name, name))?;
+
+    let map: Vec<(u16, u16)> = m
+        .port_map
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|pair| {
+            let (host, guest) = pair.split_once(':')?;
+            Some((host.parse().ok()?, guest.parse().ok()?))
+        })
+        .collect();
+
+    if map.is_empty() {
+        bail!(
+            "machine '{}' forwards no ports — declare guest ports in moo.toml under [network] and recreate the machine",
+            name
+        );
+    }
+    let forwarded = || {
+        map.iter()
+            .map(|(h, g)| format!("{}->{}", h, g))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match guest_port {
+        Some(g) => map
+            .iter()
+            .find(|(_, guest)| *guest == g)
+            .map(|(host, _)| *host)
+            .with_context(|| {
+                format!(
+                    "machine '{}' does not forward guest port {} (forwarded: {})",
+                    name,
+                    g,
+                    forwarded()
+                )
+            }),
+        None if map.len() == 1 => Ok(map[0].0),
+        None => bail!(
+            "machine '{}' forwards several ports ({}) — pick one: moo open {} <guest-port>",
+            name,
+            forwarded(),
+            name
+        ),
+    }
+}

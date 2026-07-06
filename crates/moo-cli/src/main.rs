@@ -1,5 +1,5 @@
 //! moo — git for the machine. Four verbs: new, run, save, drop.
-//! Admin: ls, doctor. (plan.md §10)
+//! Admin: ls, open, doctor. (plan.md §10)
 //!
 //! Argument parsing is hand-rolled: the surface is five commands and the
 //! `from` keyword; a parser dependency would outweigh it.
@@ -27,6 +27,7 @@ fn dispatch(args: &[String]) -> Result<i32> {
         Some("save") => cmd_save(&args[1..]),
         Some("drop") => cmd_drop(&args[1..]),
         Some("ls") => cmd_ls(),
+        Some("open") => cmd_open(&args[1..]),
         Some("doctor") => cmd_doctor(),
         Some("__shim") => cmd_shim(&args[1..]),
         _ => {
@@ -51,6 +52,9 @@ usage:
                                              snapshots survive by default)
 
   moo ls                                     list machines and snapshots
+  moo open <name> [guest-port] [/path]       open a forwarded port in the
+                                             browser (port optional when the
+                                             machine forwards exactly one)
   moo doctor                                 check this host can run machines"
     );
 }
@@ -240,6 +244,47 @@ fn cmd_ls() -> Result<i32> {
             println!("  {} @ {}", s.snapshot_id, &sha[..sha.len().min(12)]);
         }
     }
+    Ok(0)
+}
+
+/// `moo open <name> [guest-port] [/path]` — admin, read-only: resolve the
+/// host port for a forwarded guest port, print the URL, and open it in the
+/// default browser. Never touches machine state.
+fn cmd_open(args: &[String]) -> Result<i32> {
+    let mut name: Option<&str> = None;
+    let mut guest: Option<u16> = None;
+    let mut path: Option<&str> = None;
+    for a in args {
+        if name.is_none() {
+            name = Some(a);
+        } else if a.starts_with('/') && path.is_none() {
+            path = Some(a);
+        } else if guest.is_none() && !a.starts_with('/') {
+            guest = Some(
+                a.parse()
+                    .map_err(|_| anyhow::anyhow!("'{}' is not a guest port number", a))?,
+            );
+        } else {
+            bail!("unexpected argument '{}'", a);
+        }
+    }
+    let Some(name) = name else {
+        bail!("usage: moo open <name> [guest-port] [/path]");
+    };
+
+    let host_port = moo_core::resolve_host_port(name, guest)?;
+    let url = format!("http://localhost:{}{}", host_port, path.unwrap_or("/"));
+    println!("{}", url);
+
+    if !moo_core::shim::is_running(name) {
+        eprintln!(
+            "note: machine '{}' is not running — nothing answers yet; `moo run {} -- true` boots it",
+            name, name
+        );
+        return Ok(0);
+    }
+    // Best-effort browser launch; the printed URL is the contract.
+    let _ = std::process::Command::new("open").arg(&url).status();
     Ok(0)
 }
 

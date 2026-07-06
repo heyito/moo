@@ -554,7 +554,7 @@ golden image, byte-for-byte.
 
 ## 10. CLI surface
 
-Five commands (four verbs plus `doctor`; `ls` is a read-only listing).
+Six commands (four verbs plus `doctor`; `ls` and `open` are read-only).
 
 Primitive verbs (compose):
 
@@ -570,15 +570,21 @@ Admin (do not compose; parallel to `docker system prune`, `git config`):
 ```
 moo doctor                                    # diagnostic check
 moo ls                                        # list handles and their snapshots
+moo open <name> [guest-port] [/path]          # print + open the host URL for a
+                                              # forwarded guest port in the browser
 moo hook install [--force] [--append]         # opt-in: install git hooks (§8.1)
 moo hook uninstall                            # remove moo-owned hook content
 moo hook status                               # show hook installation state
 ```
 
-`moo ls`, `moo doctor`, and `moo hook *` are administrative — they do not
-compose with the primitive verbs and do not count against the four-verb
-ceiling. Every user-facing operation on machine state goes through `new`,
-`run`, `save`, `drop`, and git.
+`moo ls`, `moo open`, `moo doctor`, and `moo hook *` are administrative —
+they do not compose with the primitive verbs and do not count against the
+four-verb ceiling. `moo open` is pure plumbing over the port map that `ls`
+already shows: it resolves a handle's forwarded guest port to its host port,
+prints `http://localhost:<host-port>/`, and opens it in the default browser.
+It never touches machine state and knows nothing about what serves the port.
+Every user-facing operation on machine state goes through `new`, `run`,
+`save`, `drop`, and git.
 
 ## 11. Technology stack
 
@@ -706,8 +712,8 @@ it — using only four verbs and existing git.
 ## 15. Summary of decisions
 
 1. **Primitive.** One noun (`machine`), four verbs (`new`, `run`, `save`,
-   `drop`). Nothing else in the public surface. `doctor` and `ls` are
-   diagnostic conveniences, not part of the primitive.
+   `drop`). Nothing else in the public surface. `doctor`, `ls`, and `open`
+   are diagnostic/read-only conveniences, not part of the primitive.
 2. **Hypervisor.** libkrun on both macOS (HVF) and Linux (KVM) for code-path
    parity. Direct C ABI FFI, `stable-1.19.x`, dynamically linked. No
    `msb_krun` fork. No Microsandbox at runtime. Backend never leaks into
@@ -736,7 +742,7 @@ it — using only four verbs and existing git.
 9. **Verb-count discipline.** Four *primitive* verbs (`new`/`run`/`save`/
    `drop`) is the ceiling. The hyperplan bundle rejected orchestration
    verbs (`spawn`/`promote`/`discard`); save was added because it is a
-   *state* verb parallel to `git commit`. `doctor`, `ls`, and `hook
+   *state* verb parallel to `git commit`. `doctor`, `ls`, `open`, and `hook
    install/uninstall/status` are *administrative* — they do not compose
    with the primitive verbs and do not count against the ceiling. Any
    future feature request that requires a fifth primitive verb triggers a

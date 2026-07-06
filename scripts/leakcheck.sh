@@ -24,6 +24,8 @@ check "ls"           "$MOO" ls
 check "run-missing"  "$MOO" run no-such-machine -- true
 check "drop-missing" "$MOO" drop no-such-machine
 check "new-badsrc"   "$MOO" new leaktest from not-a-real-source
+check "open-noargs"  "$MOO" open
+check "open-missing" "$MOO" open no-such-machine
 
 if [ "$fail" -eq 0 ]; then
     echo "leakcheck: PASS (no backend names in user-facing output)"
