@@ -70,6 +70,13 @@ chmod +x /etc/rc.local
 /usr/local/bin/desktop-up
 echo "desktop services started"'
 
+say "Opening desktop terminals in the synced working tree"
+# The guest shells should land where the working tree syncs to: the
+# project's [project] workdir, or moo's default when unset.
+WORKDIR=$(sed -n 's/^[[:space:]]*workdir[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' moo.toml 2>/dev/null | head -1)
+WORKDIR="${WORKDIR:-/srv/app}"
+"$MOO" run "$NAME" -- "grep -qs 'cd $WORKDIR' /root/.bashrc || printf '\n# moo desktop: open shells in the synced working tree\n[ -d $WORKDIR ] && cd $WORKDIR\n' >> /root/.bashrc"
+
 say "Waiting for the desktop to answer"
 for _ in $(seq 1 60); do
     if curl -sf -o /dev/null "http://localhost:$port/vnc.html"; then ok=1; break; fi
@@ -82,3 +89,5 @@ say "Saving a snapshot (the desktop survives drop/restore and forks)"
 
 say "Done. Click around at:"
 printf '\n    http://localhost:%s/vnc.html?autoconnect=true&resize=scale\n\n' "$port"
+printf 'Reopen any time with:\n\n    %s open %s %s '\''/vnc.html?autoconnect=true&resize=scale'\''\n\n' \
+    "$MOO" "$NAME" "$GUEST_PORT"
