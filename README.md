@@ -128,6 +128,13 @@ just packages plus a port. With `ports = [6901]` in `moo.toml`:
 $ scripts/desktop.sh my-machine
 ```
 
+Installed from a release with no checkout? The provisioning scripts are
+attached to every release — run them from inside your project:
+
+```
+$ curl -fsSL https://github.com/heyito/moo/releases/latest/download/desktop.sh | bash -s -- my-machine
+```
+
 installs XFCE + VNC + a browser client inside the machine, starts it on
 every boot, saves a snapshot, and prints a `localhost` URL you can click
 around in. Reopen it any time with:

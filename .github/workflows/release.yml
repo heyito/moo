@@ -51,5 +51,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             moo-aarch64-apple-darwin.tar.gz \
             scripts/install.sh \
+            scripts/desktop.sh \
+            scripts/agent-base.sh \
             --title "moo $GITHUB_REF_NAME" \
             --generate-notes
