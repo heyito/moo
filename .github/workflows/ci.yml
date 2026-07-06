@@ -20,6 +20,8 @@ jobs:
       - name: Install link-time dependencies
         run: |
           brew tap slp/krun
+          # `brew trust` exists only on newer Homebrew; ignore where unsupported.
+          brew trust slp/krun 2>/dev/null || true
           brew install slp/krun/libkrun
           rustup target add aarch64-unknown-linux-musl
 
