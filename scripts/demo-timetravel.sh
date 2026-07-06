@@ -1,5 +1,5 @@
 #!/bin/bash
-# Demo 1 (mvp-plan.md §2): the differentiator. Runtime state saved per
+# Demo 1: the differentiator. Runtime state saved per
 # commit, restored by git checkout — including across a full drop.
 set -euo pipefail
 

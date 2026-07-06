@@ -64,10 +64,16 @@ mod agent {
             let mut sa_data = [0u8; 14];
             // sockaddr_in: 2 bytes port (zero), then the IPv4 address.
             sa_data[2..6].copy_from_slice(&addr);
-            SockaddrGen { sa_family: libc::AF_INET as u16, sa_data }
+            SockaddrGen {
+                sa_family: libc::AF_INET as u16,
+                sa_data,
+            }
         }
         fn zero() -> Self {
-            SockaddrGen { sa_family: libc::AF_INET as u16, sa_data: [0u8; 14] }
+            SockaddrGen {
+                sa_family: libc::AF_INET as u16,
+                sa_data: [0u8; 14],
+            }
         }
     }
 
@@ -82,7 +88,10 @@ mod agent {
         fn new(ifname: &str) -> Self {
             let mut name = [0u8; 16];
             name[..ifname.len()].copy_from_slice(ifname.as_bytes());
-            IfReq { name, data: [0u8; 24] }
+            IfReq {
+                name,
+                data: [0u8; 24],
+            }
         }
         fn with_sockaddr(ifname: &str, sa: SockaddrGen) -> Self {
             let mut req = Self::new(ifname);
@@ -118,13 +127,21 @@ mod agent {
         let mut req = IfReq::new(ifname);
         unsafe {
             if ioctl(fd, SIOCGIFFLAGS, &mut req as *mut _ as *mut _) != 0 {
-                return Err(format!("{}: get flags: {}", ifname, std::io::Error::last_os_error()));
+                return Err(format!(
+                    "{}: get flags: {}",
+                    ifname,
+                    std::io::Error::last_os_error()
+                ));
             }
             let mut flags = i16::from_ne_bytes([req.data[0], req.data[1]]);
             flags |= IFF_UP | IFF_RUNNING;
             req.data[..2].copy_from_slice(&flags.to_ne_bytes());
             if ioctl(fd, SIOCSIFFLAGS, &mut req as *mut _ as *mut _) != 0 {
-                return Err(format!("{}: set flags: {}", ifname, std::io::Error::last_os_error()));
+                return Err(format!(
+                    "{}: set flags: {}",
+                    ifname,
+                    std::io::Error::last_os_error()
+                ));
             }
         }
         Ok(())
@@ -134,12 +151,15 @@ mod agent {
     fn net_setup() {
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if fd < 0 {
-            eprintln!("moo-agent: net: no AF_INET sockets: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "moo-agent: net: no AF_INET sockets: {}",
+                std::io::Error::last_os_error()
+            );
             return;
         }
 
         if let Err(e) = if_up(fd, "lo") {
-            eprintln!("moo-agent: net: {}", e);
+            eprintln!("moo-agent: net: {e}");
         }
 
         // The NIC can probe slightly after the agent starts; wait for it.
@@ -160,10 +180,13 @@ mod agent {
 
         let mut req = IfReq::with_sockaddr("eth0", SockaddrGen::inet(NETMASK));
         if unsafe { ioctl(fd, SIOCSIFNETMASK, &mut req as *mut _ as *mut _) } != 0 {
-            eprintln!("moo-agent: net: eth0 netmask: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "moo-agent: net: eth0 netmask: {}",
+                std::io::Error::last_os_error()
+            );
         }
         if let Err(e) = if_up(fd, "eth0") {
-            eprintln!("moo-agent: net: {}", e);
+            eprintln!("moo-agent: net: {e}");
         }
 
         let mut route = RtEntry {
@@ -182,7 +205,10 @@ mod agent {
             rt_irtt: 0,
         };
         if unsafe { ioctl(fd, SIOCADDRT, &mut route as *mut _ as *mut _) } != 0 {
-            eprintln!("moo-agent: net: default route: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "moo-agent: net: default route: {}",
+                std::io::Error::last_os_error()
+            );
         }
         unsafe { libc::close(fd) };
 
@@ -191,7 +217,7 @@ mod agent {
             GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3]
         );
         if let Err(e) = fs::write("/etc/resolv.conf", dns) {
-            eprintln!("moo-agent: net: resolv.conf: {}", e);
+            eprintln!("moo-agent: net: resolv.conf: {e}");
         }
     }
 
@@ -201,7 +227,10 @@ mod agent {
     fn sync_tree(target: &str, gz_tar: &[u8]) -> Result<String, String> {
         let target = Path::new(target);
         if !target.is_absolute() {
-            return Err(format!("sync target must be absolute: {}", target.display()));
+            return Err(format!(
+                "sync target must be absolute: {}",
+                target.display()
+            ));
         }
         fs::create_dir_all(target).map_err(|e| format!("create {}: {}", target.display(), e))?;
 
@@ -216,11 +245,14 @@ mod agent {
 
         let mut installed: BTreeSet<String> = BTreeSet::new();
         let mut bytes: u64 = 0;
-        for entry in archive.entries().map_err(|e| format!("read archive: {}", e))? {
-            let mut entry = entry.map_err(|e| format!("read entry: {}", e))?;
+        for entry in archive
+            .entries()
+            .map_err(|e| format!("read archive: {e}"))?
+        {
+            let mut entry = entry.map_err(|e| format!("read entry: {e}"))?;
             let rel = entry
                 .path()
-                .map_err(|e| format!("entry path: {}", e))?
+                .map_err(|e| format!("entry path: {e}"))?
                 .to_string_lossy()
                 .into_owned();
             bytes += entry.size();
@@ -229,7 +261,7 @@ mod agent {
             }
             entry
                 .unpack_in(target)
-                .map_err(|e| format!("unpack {}: {}", rel, e))?;
+                .map_err(|e| format!("unpack {rel}: {e}"))?;
         }
 
         // Remove what the last sync installed but this one didn't.
@@ -262,7 +294,7 @@ mod agent {
 
         let manifest_body = installed.iter().cloned().collect::<Vec<_>>().join("\n");
         fs::write(target.join(MANIFEST), manifest_body)
-            .map_err(|e| format!("write manifest: {}", e))?;
+            .map_err(|e| format!("write manifest: {e}"))?;
 
         Ok(format!(
             "synced {} files ({:.1} MB) to {}",
@@ -435,7 +467,7 @@ mod agent {
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
             }
-            Err(e) => eprintln!("moo-agent: rc.local: {}", e),
+            Err(e) => eprintln!("moo-agent: rc.local: {e}"),
             _ => {}
         }
     }

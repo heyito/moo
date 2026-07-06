@@ -1,5 +1,5 @@
 #!/bin/bash
-# Backend-leak gate (plan.md §13): no hypervisor names may appear in any
+# Backend-leak gate: no hypervisor names may appear in any
 # user-facing output. Runs every CLI surface and greps stdout+stderr.
 set -uo pipefail
 

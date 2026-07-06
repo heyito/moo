@@ -9,7 +9,10 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let agent_dir = manifest_dir.parent().unwrap().join("guest-agent");
     println!("cargo:rerun-if-changed={}", agent_dir.join("src").display());
-    println!("cargo:rerun-if-changed={}", agent_dir.join("Cargo.toml").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        agent_dir.join("Cargo.toml").display()
+    );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     // Separate target dir: avoids deadlocking on the parent build's lock.

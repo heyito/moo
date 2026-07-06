@@ -1,4 +1,4 @@
-//! Lifecycle orchestration for the four verbs (plan.md §6).
+//! Lifecycle orchestration for the four verbs.
 
 pub mod config;
 pub mod git;
@@ -7,9 +7,7 @@ pub mod shim;
 pub mod sync;
 
 use anyhow::{bail, Context, Result};
-use moo_store::{
-    cow_clone, machines_dir, save_snapshot, timestamp, Machine, Registry, Snapshot,
-};
+use moo_store::{cow_clone, machines_dir, save_snapshot, timestamp, Machine, Registry, Snapshot};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -46,11 +44,11 @@ fn boot(handle: &str) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    bail!("machine '{}' did not come up", handle);
+    bail!("machine '{handle}' did not come up");
 }
 
-/// Deterministic per-handle host ports for the project's guest ports
-/// (plan.md §7). The candidate derives from a stable hash of
+/// Deterministic per-handle host ports for the project's guest ports.
+/// The candidate derives from a stable hash of
 /// (handle, guest port); collisions with ports already in use on the host
 /// probe forward until a free one is found.
 fn allocate_ports(handle: &str, guest_ports: &[u16]) -> Vec<(u16, u16)> {
@@ -66,8 +64,8 @@ fn allocate_ports(handle: &str, guest_ports: &[u16]) -> Vec<(u16, u16)> {
         let mut candidate = RANGE_START + (seed % RANGE_LEN);
         for _ in 0..RANGE_LEN {
             let port = candidate as u16;
-            let free = !taken.contains(&port)
-                && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+            let free =
+                !taken.contains(&port) && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
             if free {
                 taken.push(port);
                 map.push((port, guest));
@@ -81,7 +79,7 @@ fn allocate_ports(handle: &str, guest_ports: &[u16]) -> Vec<(u16, u16)> {
 
 fn format_port_map(map: &[(u16, u16)]) -> String {
     map.iter()
-        .map(|(h, g)| format!("{}:{}", h, g))
+        .map(|(h, g)| format!("{h}:{g}"))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -99,7 +97,7 @@ fn stop(handle: &str) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    bail!("machine '{}' did not shut down", handle);
+    bail!("machine '{handle}' did not shut down");
 }
 
 pub struct NewOutcome {
@@ -122,7 +120,7 @@ fn sync_after_new(reg: &Registry, name: &str) -> Result<Option<sync::SyncOutcome
     sync::sync_into(&machine)
 }
 
-/// `moo new <name> [from <src>]` — idempotent create/restore (plan.md §6.1).
+/// `moo new <name> [from <src>]` — idempotent create/restore.
 pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<NewOutcome> {
     let reg = Registry::open()?;
     std::fs::create_dir_all(machines_dir())?;
@@ -170,66 +168,65 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
     }
 
     // New handle: resolve the source into a disk to clone. The golden image
-    // is built on first use for this project's recipe (plan.md §5).
+    // is built on first use for this project's recipe.
     let (cfg, root) = config::load()?;
     let base_image = image::ensure(&cfg, &root)?;
     let mut restored_from = None;
-    let (source_disk, base_commit, parent): (PathBuf, Option<String>, Option<String>) =
-        match from {
-            Some(src) if src.starts_with("s_") => {
-                let snap = reg
-                    .get_snapshot_by_id(src)?
-                    .with_context(|| format!("no snapshot '{}'", src))?;
-                let path = PathBuf::from(&snap.snapshot_path);
-                let sha = snap.head_sha.clone();
-                restored_from = Some(snap);
-                (path, sha, None)
-            }
-            Some(src) => {
-                if let Some(other) = reg.get_machine(src)? {
-                    // Fork another machine: quiesce it first (plan.md §5.1).
-                    if shim::is_running(src) {
-                        let (code, _) = shim::request(src, moo_vmm::proto::QUIESCE)?;
-                        anyhow::ensure!(code == 0, "could not quiesce machine '{}'", src);
-                    }
-                    moo_store::full_fsync(Path::new(&other.overlay_path))?;
-                    (
-                        PathBuf::from(&other.overlay_path),
-                        other.base_commit.clone(),
-                        Some(other.handle.clone()),
-                    )
-                } else if let Some(sha) = git::resolve(src) {
-                    // A commit-ish: restore this handle's snapshot for that
-                    // SHA if one exists, else start from the base image.
-                    match reg.find_snapshot(name, &sha)? {
-                        Some(snap) => {
-                            let path = PathBuf::from(&snap.snapshot_path);
-                            restored_from = Some(snap);
-                            (path, Some(sha), None)
-                        }
-                        None => (base_image.clone(), Some(sha), None),
-                    }
-                } else {
-                    bail!("'{}' is not a snapshot, machine, or git commit", src);
+    let (source_disk, base_commit, parent): (PathBuf, Option<String>, Option<String>) = match from {
+        Some(src) if src.starts_with("s_") => {
+            let snap = reg
+                .get_snapshot_by_id(src)?
+                .with_context(|| format!("no snapshot '{src}'"))?;
+            let path = PathBuf::from(&snap.snapshot_path);
+            let sha = snap.head_sha.clone();
+            restored_from = Some(snap);
+            (path, sha, None)
+        }
+        Some(src) => {
+            if let Some(other) = reg.get_machine(src)? {
+                // Fork another machine: quiesce it first.
+                if shim::is_running(src) {
+                    let (code, _) = shim::request(src, moo_vmm::proto::QUIESCE)?;
+                    anyhow::ensure!(code == 0, "could not quiesce machine '{src}'");
                 }
-            }
-            None => {
-                // Reusing a dropped handle restores the snapshot saved for
-                // the SHA it shadows now, if any (plan.md §6.4).
-                let head = git::shadowed_head(name);
-                match &head {
-                    Some(sha) => match reg.find_snapshot(name, sha)? {
-                        Some(snap) => {
-                            let path = PathBuf::from(&snap.snapshot_path);
-                            restored_from = Some(snap);
-                            (path, head.clone(), None)
-                        }
-                        None => (base_image.clone(), head.clone(), None),
-                    },
-                    None => (base_image.clone(), None, None),
+                moo_store::full_fsync(Path::new(&other.overlay_path))?;
+                (
+                    PathBuf::from(&other.overlay_path),
+                    other.base_commit.clone(),
+                    Some(other.handle.clone()),
+                )
+            } else if let Some(sha) = git::resolve(src) {
+                // A commit-ish: restore this handle's snapshot for that
+                // SHA if one exists, else start from the base image.
+                match reg.find_snapshot(name, &sha)? {
+                    Some(snap) => {
+                        let path = PathBuf::from(&snap.snapshot_path);
+                        restored_from = Some(snap);
+                        (path, Some(sha), None)
+                    }
+                    None => (base_image.clone(), Some(sha), None),
                 }
+            } else {
+                bail!("'{src}' is not a snapshot, machine, or git commit");
             }
-        };
+        }
+        None => {
+            // Reusing a dropped handle restores the snapshot saved for
+            // the SHA it shadows now, if any.
+            let head = git::shadowed_head(name);
+            match &head {
+                Some(sha) => match reg.find_snapshot(name, sha)? {
+                    Some(snap) => {
+                        let path = PathBuf::from(&snap.snapshot_path);
+                        restored_from = Some(snap);
+                        (path, head.clone(), None)
+                    }
+                    None => (base_image.clone(), head.clone(), None),
+                },
+                None => (base_image.clone(), None, None),
+            }
+        }
+    };
 
     let overlay = overlay_path(name);
     if overlay.exists() {
@@ -267,13 +264,13 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
     })
 }
 
-/// `moo run <name> -- <cmd>` — execute inside the machine (plan.md §6.2).
+/// `moo run <name> -- <cmd>` — execute inside the machine.
 /// The working tree follows the code: when invoked from the machine's
 /// repository, any host-side change is synced in before the command runs.
 pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
     let reg = Registry::open()?;
     let Some(machine) = reg.get_machine(name)? else {
-        bail!("no machine '{}' — create it with `moo new {}`", name, name);
+        bail!("no machine '{name}' — create it with `moo new {name}`");
     };
     if !shim::is_running(name) {
         // Machines persist between invocations; reboot the live overlay.
@@ -295,16 +292,16 @@ pub struct SaveOutcome {
     pub fresh: bool,
 }
 
-/// `moo save <name>` — quiesce, snapshot, associate with HEAD (plan.md §6.3).
+/// `moo save <name>` — quiesce, snapshot, associate with HEAD.
 pub fn save_machine(name: &str) -> Result<SaveOutcome> {
     let reg = Registry::open()?;
     let m = reg
         .get_machine(name)?
-        .with_context(|| format!("no machine '{}'", name))?;
+        .with_context(|| format!("no machine '{name}'"))?;
 
     if shim::is_running(name) {
         // Project-defined quiesce commands (DB checkpoints etc.) run first,
-        // then the built-in filesystem sync (plan.md §6.3).
+        // then the built-in filesystem sync.
         let (cfg, _) = config::load()?;
         for cmd in &cfg.quiesce.commands {
             let (code, out) = shim::request(name, cmd.as_bytes())?;
@@ -327,9 +324,12 @@ pub fn save_machine(name: &str) -> Result<SaveOutcome> {
         }
     }
 
-    let head = if m.detached { None } else { git::shadowed_head(name) };
-    let (snapshot, fresh) =
-        save_snapshot(&reg, name, head.as_deref(), Path::new(&m.overlay_path))?;
+    let head = if m.detached {
+        None
+    } else {
+        git::shadowed_head(name)
+    };
+    let (snapshot, fresh) = save_snapshot(&reg, name, head.as_deref(), Path::new(&m.overlay_path))?;
     Ok(SaveOutcome { snapshot, fresh })
 }
 
@@ -345,7 +345,7 @@ pub fn save_all() -> Result<Vec<(String, SaveOutcome)>> {
 }
 
 /// `moo drop <name>` — destroy the live machine; snapshots survive unless
-/// `drop_snapshots` (plan.md §6.4). Idempotent.
+/// `drop_snapshots`. Idempotent.
 pub fn drop_machine(name: &str, force: bool, drop_snapshots: bool) -> Result<()> {
     let reg = Registry::open()?;
 
@@ -402,19 +402,23 @@ pub fn list() -> Result<Vec<LsRow>> {
     for m in reg.list_machines()? {
         let running = shim::is_running(&m.handle);
         let snapshots = reg.list_snapshots(Some(&m.handle))?;
-        rows.push(LsRow { machine: m, running, snapshots });
+        rows.push(LsRow {
+            machine: m,
+            running,
+            snapshots,
+        });
     }
     Ok(rows)
 }
 
 /// `moo open` — resolve the host port forwarded to a machine's guest port
-/// (admin, read-only; plan.md §10). With no guest port, resolves only when
+/// (admin, read-only). With no guest port, resolves only when
 /// the machine forwards exactly one port.
 pub fn resolve_host_port(name: &str, guest_port: Option<u16>) -> Result<u16> {
     let reg = Registry::open()?;
     let m = reg
         .get_machine(name)?
-        .with_context(|| format!("no machine '{}' — create it with `moo new {}`", name, name))?;
+        .with_context(|| format!("no machine '{name}' — create it with `moo new {name}`"))?;
 
     let map: Vec<(u16, u16)> = m
         .port_map
@@ -428,13 +432,12 @@ pub fn resolve_host_port(name: &str, guest_port: Option<u16>) -> Result<u16> {
 
     if map.is_empty() {
         bail!(
-            "machine '{}' forwards no ports — declare guest ports in moo.toml under [network] and recreate the machine",
-            name
+            "machine '{name}' forwards no ports — declare guest ports in moo.toml under [network] and recreate the machine"
         );
     }
     let forwarded = || {
         map.iter()
-            .map(|(h, g)| format!("{}->{}", h, g))
+            .map(|(h, g)| format!("{h}->{g}"))
             .collect::<Vec<_>>()
             .join(" ")
     };

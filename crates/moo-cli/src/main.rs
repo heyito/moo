@@ -1,5 +1,5 @@
 //! moo — git for the machine. Four verbs: new, run, save, drop.
-//! Admin: ls, open, doctor. (plan.md §10)
+//! Admin: ls, open, doctor.
 //!
 //! Argument parsing is hand-rolled: the surface is five commands and the
 //! `from` keyword; a parser dependency would outweigh it.
@@ -13,7 +13,7 @@ fn main() {
     let code = match dispatch(&args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("moo: {:#}", e);
+            eprintln!("moo: {e:#}");
             1
         }
     };
@@ -75,13 +75,16 @@ fn cmd_new(args: &[String]) -> Result<i32> {
             }
             "--detached" => detached = true,
             other if name.is_none() => name = Some(other.to_string()),
-            other => bail!("unexpected argument '{}'", other),
+            other => bail!("unexpected argument '{other}'"),
         }
         i += 1;
     }
     let name = match (name, detached) {
         (Some(n), _) => n,
-        (None, true) => format!("m_{:08x}", std::process::id() as u64 * 2654435761 % 0xFFFF_FFFF),
+        (None, true) => format!(
+            "m_{:08x}",
+            std::process::id() as u64 * 2654435761 % 0xFFFF_FFFF
+        ),
         (None, false) => bail!("machine name required (or --detached)"),
     };
 
@@ -133,7 +136,11 @@ fn cmd_run(args: &[String]) -> Result<i32> {
     let cmd = if cmd_parts.len() == 1 {
         cmd_parts[0].clone()
     } else {
-        cmd_parts.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
+        cmd_parts
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     let (code, out) = moo_core::run_in_machine(name, &cmd)?;
     std::io::stdout().write_all(&out)?;
@@ -163,7 +170,8 @@ fn cmd_save(args: &[String]) -> Result<i32> {
 fn shell_quote(s: &str) -> String {
     let safe = !s.is_empty()
         && s.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '@' | '+' | '%')
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | ',' | '@' | '+' | '%')
         });
     if safe {
         s.to_string()
@@ -176,7 +184,10 @@ fn print_save(name: &str, o: &moo_core::SaveOutcome) {
     let sha = o.snapshot.head_sha.as_deref().unwrap_or("(no commit)");
     let sha_short = &sha[..sha.len().min(12)];
     if o.fresh {
-        println!("saved '{}' as {} (commit {})", name, o.snapshot.snapshot_id, sha_short);
+        println!(
+            "saved '{}' as {} (commit {})",
+            name, o.snapshot.snapshot_id, sha_short
+        );
     } else {
         println!(
             "'{}' unchanged since {} (commit {})",
@@ -194,12 +205,18 @@ fn cmd_drop(args: &[String]) -> Result<i32> {
             "--force" => force = true,
             "--snapshots" => snapshots = true,
             other if name.is_none() => name = Some(other.to_string()),
-            other => bail!("unexpected argument '{}'", other),
+            other => bail!("unexpected argument '{other}'"),
         }
     }
-    let Some(name) = name else { bail!("usage: moo drop <name> [--force] [--snapshots]") };
+    let Some(name) = name else {
+        bail!("usage: moo drop <name> [--force] [--snapshots]")
+    };
     moo_core::drop_machine(&name, force, snapshots)?;
-    println!("machine '{}' dropped{}", name, if snapshots { " (snapshots too)" } else { "" });
+    println!(
+        "machine '{}' dropped{}",
+        name,
+        if snapshots { " (snapshots too)" } else { "" }
+    );
     Ok(0)
 }
 
@@ -214,7 +231,11 @@ fn cmd_ls() -> Result<i32> {
         "HANDLE", "STATE", "BASE COMMIT", "PORTS (host->guest)"
     );
     for row in rows {
-        let state = if row.running { "running" } else { &row.machine.lifecycle };
+        let state = if row.running {
+            "running"
+        } else {
+            &row.machine.lifecycle
+        };
         let base = row
             .machine
             .base_commit
@@ -262,10 +283,10 @@ fn cmd_open(args: &[String]) -> Result<i32> {
         } else if guest.is_none() && !a.starts_with('/') {
             guest = Some(
                 a.parse()
-                    .map_err(|_| anyhow::anyhow!("'{}' is not a guest port number", a))?,
+                    .map_err(|_| anyhow::anyhow!("'{a}' is not a guest port number"))?,
             );
         } else {
-            bail!("unexpected argument '{}'", a);
+            bail!("unexpected argument '{a}'");
         }
     }
     let Some(name) = name else {
@@ -274,12 +295,11 @@ fn cmd_open(args: &[String]) -> Result<i32> {
 
     let host_port = moo_core::resolve_host_port(name, guest)?;
     let url = format!("http://localhost:{}{}", host_port, path.unwrap_or("/"));
-    println!("{}", url);
+    println!("{url}");
 
     if !moo_core::shim::is_running(name) {
         eprintln!(
-            "note: machine '{}' is not running — nothing answers yet; `moo run {} -- true` boots it",
-            name, name
+            "note: machine '{name}' is not running — nothing answers yet; `moo run {name} -- true` boots it"
         );
         return Ok(0);
     }
@@ -293,7 +313,7 @@ fn cmd_doctor() -> Result<i32> {
     let mut check = |name: &str, pass: bool, hint: &str| {
         println!("{} {}", if pass { "ok " } else { "FAIL" }, name);
         if !pass {
-            println!("     {}", hint);
+            println!("     {hint}");
             ok = false;
         }
     };

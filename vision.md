@@ -5,9 +5,6 @@
 > a commit, saved back to a commit, followed by `git checkout`, dropped
 > when you're done.
 
-See [mvp-plan.md](mvp-plan.md) for the minimal cut that proves the thesis,
-and [plan.md](plan.md) for the full engineering plan.
-
 ---
 
 ## 1. The gap
@@ -304,8 +301,8 @@ down now so they cannot be rationalized away later.
 
 - **Before building** — if a weekend spike cannot achieve microVM boot
   plus APFS-CoW snapshot restore under ~2 s on a real Apple Silicon
-  Mac, the core promise is at risk and the plan re-opens. See
-  [mvp-plan.md](mvp-plan.md) §4 WP0.
+  Mac, the core promise is at risk and the plan re-opens. (This gate
+  passed; the spike lives in `crates/spike`.)
 - **At three months** — if the worktree-agent developers who wrote the
   2026 collision-pain blog posts (the natural first 20 users) try `moo`
   and still prefer their five-tool script stack, the whole-runtime

@@ -1,5 +1,5 @@
 //! Storage: the SQLite registry, copy-on-write clones, and the
-//! content-addressed snapshot store (plan.md §4.2, §5).
+//! content-addressed snapshot store.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -52,7 +52,7 @@ pub fn cow_clone(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Flush a file's data all the way to the physical drive. Snapshots must
-/// survive power loss (plan.md §5.1), so this is used before every clone
+/// survive power loss, so this is used before every clone
 /// that produces a snapshot.
 pub fn full_fsync(path: &Path) -> Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -83,7 +83,10 @@ pub fn content_hash(path: &Path) -> Result<String> {
 }
 
 fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 // ---- registry ----
@@ -96,7 +99,7 @@ pub struct Machine {
     pub parent_machine: Option<String>,
     pub base_image_path: String,
     pub overlay_path: String,
-    /// "live" or "sealed" (plan.md §4.2).
+    /// "live" or "sealed".
     pub lifecycle: String,
     pub detached: bool,
     pub created_at: i64,
@@ -225,7 +228,10 @@ impl Registry {
         Ok(self
             .conn
             .query_row(
-                &format!("SELECT {} FROM machines WHERE handle = ?1", Self::MACHINE_COLS),
+                &format!(
+                    "SELECT {} FROM machines WHERE handle = ?1",
+                    Self::MACHINE_COLS
+                ),
                 params![handle],
                 Self::row_to_machine,
             )
@@ -347,7 +353,7 @@ impl Registry {
 
 /// Save `overlay` as a content-addressed snapshot and record it.
 /// Idempotent: if the latest snapshot for (handle, head_sha) has the same
-/// content hash, returns the existing snapshot (plan.md §5.3).
+/// content hash, returns the existing snapshot.
 pub fn save_snapshot(
     reg: &Registry,
     handle: &str,

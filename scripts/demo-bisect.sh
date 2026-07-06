@@ -1,5 +1,5 @@
 #!/bin/bash
-# The headline demo (mvp-plan.md §2, Demo 3): a bug that only reproduces
+# The headline demo: a bug that only reproduces
 # against a specific database migration state, found unattended by
 # `git bisect run` booting each commit's saved runtime.
 #

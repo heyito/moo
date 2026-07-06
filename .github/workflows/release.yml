@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install link-time dependencies
+        run: |
+          brew tap slp/krun
+          brew install slp/krun/libkrun
+          rustup target add aarch64-unknown-linux-musl
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Sign binary
+        run: |
+          codesign --force --sign - \
+            --entitlements crates/moo-cli/entitlements.plist \
+            target/release/moo
+
+      - name: Leakcheck
+        run: scripts/leakcheck.sh
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/release/moo dist/
+          cp crates/moo-cli/entitlements.plist dist/
+          cp LICENSE dist/
+          tar -czf moo-aarch64-apple-darwin.tar.gz -C dist .
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            moo-aarch64-apple-darwin.tar.gz \
+            scripts/install.sh \
+            --title "moo $GITHUB_REF_NAME" \
+            --generate-notes

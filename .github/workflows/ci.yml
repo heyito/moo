@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # Apple Silicon runner: the workspace links libkrun and cross-builds the
+    # arm64 guest agent. Machines cannot boot on hosted runners (no nested
+    # virtualization), so the demo suite runs locally, not here.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install link-time dependencies
+        run: |
+          brew tap slp/krun
+          brew install slp/krun/libkrun
+          rustup target add aarch64-unknown-linux-musl
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+
+      - name: Sign binary
+        run: |
+          codesign --force --sign - \
+            --entitlements crates/moo-cli/entitlements.plist \
+            target/release/moo
+
+      - name: Leakcheck (no backend names in user-facing output)
+        run: scripts/leakcheck.sh

@@ -102,7 +102,7 @@ fn pack(root: &Path, files: &[String]) -> Result<Vec<u8>> {
             continue; // vanished since listing — the next sync will settle it
         }
         tar.append_path_with_name(&path, rel)
-            .with_context(|| format!("archive {}", rel))?;
+            .with_context(|| format!("archive {rel}"))?;
     }
     let gz = tar.into_inner().context("finish archive")?;
     let bytes = gz.finish().context("finish compression")?;
@@ -168,5 +168,9 @@ pub fn sync_into(machine: &Machine) -> Result<Option<SyncOutcome>> {
     let mut f = std::fs::File::create(&state_path)?;
     f.write_all(print.as_bytes())?;
 
-    Ok(Some(SyncOutcome { files: files.len(), bytes, workdir }))
+    Ok(Some(SyncOutcome {
+        files: files.len(),
+        bytes,
+        workdir,
+    }))
 }

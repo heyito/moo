@@ -21,6 +21,10 @@ $ moo new feat/billing                       # …and the machine follows.
 One noun (the **machine**), four verbs (`new`, `run`, `save`, `drop`).
 Everything else composes from those four plus the git you already know.
 
+> **Status: alpha.** `moo` runs on macOS Apple Silicon only (Linux hosts
+> planned). Pre-1.0: the CLI surface is stable, but the snapshot format
+> may still change between releases.
+
 ## Why
 
 Running parallel coding agents against one repo hits the same wall every
@@ -44,18 +48,36 @@ that existed at every commit it probes.
 
 ## Install
 
-Requirements: Apple Silicon Mac, [Homebrew](https://brew.sh),
-[Rust](https://rustup.rs). No root, no daemon, nothing runs in the
+Requirements checked before anything is installed: an Apple Silicon Mac
+and [Homebrew](https://brew.sh). No root, no daemon, nothing runs in the
 background except your machines.
 
-```
-$ git clone <this repo> && cd moo
-$ scripts/install.sh
+```bash
+curl -fsSL https://github.com/heyito/moo/releases/latest/download/install.sh | sh
 ```
 
-The script installs the isolation runtime and filesystem tools via
-Homebrew, builds and signs the binary, and finishes with `moo doctor` —
-four green checks and you're ready.
+The installer brew-installs the isolation runtime and filesystem tools,
+downloads the prebuilt binary for the release, signs it, installs it to
+`/opt/homebrew/bin/moo`, and finishes with `moo doctor` — exit code 0
+and four green checks mean you're ready. Verify end to end with one
+machine (prints `ok`):
+
+```bash
+moo new smoke && moo run smoke -- echo ok && moo drop smoke --force
+```
+
+### From source
+
+Additionally requires [Rust](https://rustup.rs):
+
+```bash
+git clone https://github.com/heyito/moo && cd moo
+scripts/install.sh
+```
+
+Same result: deps via Homebrew, then a local build is signed, installed,
+and checked with `moo doctor`. Both installers are non-interactive and
+safe to run from a coding agent; see [AGENTS.md](AGENTS.md).
 
 ## The four verbs
 
@@ -221,6 +243,14 @@ $ scripts/demo-bisect.sh       # git bisect finds a bug that only exists in a
                                # specific migration state — unattended
 ```
 
+## Working with coding agents
+
+`moo` is built for agent workflows: [AGENTS.md](AGENTS.md) is a terse
+machine-readable reference (install, verbs, rules), and
+[skills/moo-code/SKILL.md](skills/moo-code/SKILL.md) is an installable
+skill for Claude Code / Cursor that teaches an agent the full workflow —
+isolated machines per branch, save at commit boundaries, fork-and-promote.
+
 ## Development
 
 ```
@@ -229,4 +259,9 @@ $ scripts/leakcheck.sh              # gate: no backend names in user output
 ```
 
 The isolation backend is an implementation detail and never appears in
-user-facing output; `scripts/leakcheck.sh` enforces this in CI.
+user-facing output; `scripts/leakcheck.sh` enforces this in CI. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the demo suite that gates PRs.
+
+## License
+
+[MIT](LICENSE)

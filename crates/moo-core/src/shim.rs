@@ -1,4 +1,4 @@
-//! The machine supervisor. `moo` has no daemon (plan.md §4.1): each running
+//! The machine supervisor. `moo` has no daemon: each running
 //! machine is owned by one detached shim process that boots the guest as a
 //! child and proxies the exec protocol between a per-machine UNIX socket and
 //! the guest's serial channel.
@@ -36,7 +36,10 @@ pub(crate) fn net_socket_path(handle: &str) -> PathBuf {
 }
 
 pub(crate) fn net_api_path(handle: &str) -> PathBuf {
-    runtime_dir().join(format!("{}.net.api.sock", sanitize(handle).replace('%', "_")))
+    runtime_dir().join(format!(
+        "{}.net.api.sock",
+        sanitize(handle).replace('%', "_")
+    ))
 }
 
 pub fn sanitize(handle: &str) -> String {
@@ -92,7 +95,11 @@ fn net_api_post(api_sock: &Path, path: &str, body: &str) -> Result<()> {
     let mut resp = String::new();
     let _ = conn.read_to_string(&mut resp);
     let status_ok = resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200");
-    anyhow::ensure!(status_ok, "network control request failed: {}", resp.lines().next().unwrap_or(""));
+    anyhow::ensure!(
+        status_ok,
+        "network control request failed: {}",
+        resp.lines().next().unwrap_or("")
+    );
     Ok(())
 }
 
@@ -101,7 +108,9 @@ fn net_api_post(api_sock: &Path, path: &str, body: &str) -> Result<()> {
 fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
     let api = net_api_path(handle);
     for pair in port_map {
-        let Some((host, guest)) = pair.split_once(':') else { continue };
+        let Some((host, guest)) = pair.split_once(':') else {
+            continue;
+        };
         let body = format!(
             r#"{{"local":"127.0.0.1:{}","remote":"{}:{}"}}"#,
             host,
@@ -109,7 +118,7 @@ fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
             guest
         );
         net_api_post(&api, "/services/forwarder/expose", &body)
-            .with_context(|| format!("expose port {} -> {}", host, guest))?;
+            .with_context(|| format!("expose port {host} -> {guest}"))?;
     }
     Ok(())
 }
@@ -121,7 +130,7 @@ fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
 pub fn run(handle: &str) -> Result<()> {
     let machine = Registry::open()?
         .get_machine(handle)?
-        .with_context(|| format!("no machine '{}'", handle))?;
+        .with_context(|| format!("no machine '{handle}'"))?;
     let overlay = machine.overlay_path.clone();
     let port_map: Vec<String> = machine
         .port_map
@@ -173,7 +182,7 @@ pub fn run(handle: &str) -> Result<()> {
         };
         // Only returns on failure.
         let err = moo_vmm::enter(&cfg).unwrap_err();
-        eprintln!("{:#}", err);
+        eprintln!("{err:#}");
         std::process::exit(1);
     }
 
@@ -212,7 +221,9 @@ pub fn run(handle: &str) -> Result<()> {
     // channel has no multiplexing.
     for conn in listener.incoming() {
         let Ok(mut conn) = conn else { continue };
-        let Ok(req) = proto::read_request(&mut conn) else { continue };
+        let Ok(req) = proto::read_request(&mut conn) else {
+            continue;
+        };
         if proto::send_request(&mut guest_in, &req).is_err() {
             let _ = proto::write_response(&mut conn, 255, b"machine is shutting down");
             continue;
@@ -233,7 +244,7 @@ pub fn run(handle: &str) -> Result<()> {
 pub fn request(handle: &str, cmd: &[u8]) -> Result<(u8, Vec<u8>)> {
     let sock = socket_path(handle);
     let mut conn = std::os::unix::net::UnixStream::connect(&sock)
-        .with_context(|| format!("machine '{}' is not running", handle))?;
+        .with_context(|| format!("machine '{handle}' is not running"))?;
     proto::send_request(&mut conn, cmd)?;
     Ok(proto::read_response(&mut conn)?)
 }

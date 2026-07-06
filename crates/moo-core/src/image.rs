@@ -1,4 +1,4 @@
-//! Golden base images (plan.md §5): content-addressed by recipe hash,
+//! Golden base images: content-addressed by recipe hash,
 //! built once per hash, cached under `~/.moo/images/`.
 //!
 //! The WP0-validated pipeline: fetch OCI layers straight from the registry
@@ -22,12 +22,12 @@ pub const DEFAULT_BASE: &str = "debian:bookworm";
 /// Return the golden image for this project, building it on first use.
 pub fn ensure(cfg: &MooToml, project_root: &Path) -> Result<PathBuf> {
     let hash = cfg.recipe_hash(project_root);
-    let path = images_dir().join(format!("{}.img", hash));
+    let path = images_dir().join(format!("{hash}.img"));
     if path.exists() {
         return Ok(path);
     }
     let base_ref = cfg.project.base.as_deref().unwrap_or(DEFAULT_BASE);
-    eprintln!("moo: building base image from {} (first use for this recipe)", base_ref);
+    eprintln!("moo: building base image from {base_ref} (first use for this recipe)");
     build(base_ref, &path)?;
     Ok(path)
 }
@@ -56,7 +56,11 @@ fn parse_ref(s: &str) -> ImageRef {
             tag,
         }
     } else {
-        let repo = if name.contains('/') { name } else { format!("library/{}", name) };
+        let repo = if name.contains('/') {
+            name
+        } else {
+            format!("library/{name}")
+        };
         ImageRef {
             registry: "registry-1.docker.io".to_string(),
             repo,
@@ -79,14 +83,17 @@ struct Client {
 
 impl Client {
     fn new() -> Self {
-        Self { agent: ureq::AgentBuilder::new().build(), token: None }
+        Self {
+            agent: ureq::AgentBuilder::new().build(),
+            token: None,
+        }
     }
 
     fn get(&mut self, url: &str, accept: &str) -> Result<ureq::Response> {
         for _ in 0..2 {
             let mut req = self.agent.get(url).set("Accept", accept);
             if let Some(t) = &self.token {
-                req = req.set("Authorization", &format!("Bearer {}", t));
+                req = req.set("Authorization", &format!("Bearer {t}"));
             }
             match req.call() {
                 Ok(resp) => return Ok(resp),
@@ -100,7 +107,7 @@ impl Client {
                 Err(e) => return Err(e).context("registry request failed"),
             }
         }
-        bail!("registry authentication failed for {}", url);
+        bail!("registry authentication failed for {url}");
     }
 }
 
@@ -114,7 +121,9 @@ fn anonymous_token(agent: &ureq::Agent, challenge: &str) -> Result<String> {
             Some((k.trim().to_string(), v.trim().trim_matches('"').to_string()))
         })
         .collect();
-    let realm = fields.get("realm").context("auth challenge missing realm")?;
+    let realm = fields
+        .get("realm")
+        .context("auth challenge missing realm")?;
     let mut req = agent.get(realm);
     for key in ["service", "scope"] {
         if let Some(v) = fields.get(key) {
@@ -147,13 +156,14 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
             .as_array()
             .unwrap()
             .iter()
-            .find(|m| {
-                m["platform"]["os"] == "linux" && m["platform"]["architecture"] == "arm64"
-            })
+            .find(|m| m["platform"]["os"] == "linux" && m["platform"]["architecture"] == "arm64")
             .and_then(|m| m["digest"].as_str())
-            .with_context(|| format!("{} has no linux/arm64 build", base_ref))?
+            .with_context(|| format!("{base_ref} has no linux/arm64 build"))?
             .to_string();
-        let url = format!("https://{}/v2/{}/manifests/{}", img.registry, img.repo, digest);
+        let url = format!(
+            "https://{}/v2/{}/manifests/{}",
+            img.registry, img.repo, digest
+        );
         client.get(&url, MANIFEST_ACCEPT)?.into_json()?
     } else {
         top
@@ -178,10 +188,10 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
 
     for (i, (digest, media, size)) in layers.iter().enumerate() {
         if !media.contains("tar") {
-            bail!("unsupported layer type in {}: {}", base_ref, media);
+            bail!("unsupported layer type in {base_ref}: {media}");
         }
         if media.contains("zstd") {
-            bail!("zstd-compressed images are not supported yet: {}", base_ref);
+            bail!("zstd-compressed images are not supported yet: {base_ref}");
         }
         eprintln!(
             "moo:   layer {}/{} ({:.1} MB)",
@@ -192,7 +202,7 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
         let url = format!("https://{}/v2/{}/blobs/{}", img.registry, img.repo, digest);
         let resp = client.get(&url, "application/octet-stream")?;
         apply_layer(resp.into_reader(), &rootfs, &mut owners)
-            .with_context(|| format!("unpack layer {}", digest))?;
+            .with_context(|| format!("unpack layer {digest}"))?;
     }
 
     // Inject the guest agent (runs as the machine's init).
@@ -208,9 +218,7 @@ fn build(base_ref: &str, out: &Path) -> Result<()> {
     fix_ownership(&tmp_img, &rootfs, &owners)?;
 
     std::fs::create_dir_all(images_dir())?;
-    std::fs::rename(&tmp_img, out).or_else(|_| {
-        std::fs::copy(&tmp_img, out).map(|_| ())
-    })?;
+    std::fs::rename(&tmp_img, out).or_else(|_| std::fs::copy(&tmp_img, out).map(|_| ()))?;
     eprintln!("moo: base image ready");
     Ok(())
 }
@@ -228,10 +236,14 @@ fn apply_layer(
 
     for entry in archive.entries()? {
         let mut entry = entry?;
-        let rel: PathBuf = entry.path()?.components().skip_while(|c| {
-            matches!(c, std::path::Component::CurDir)
-        }).collect();
-        let Some(name) = rel.file_name().and_then(|n| n.to_str()) else { continue };
+        let rel: PathBuf = entry
+            .path()?
+            .components()
+            .skip_while(|c| matches!(c, std::path::Component::CurDir))
+            .collect();
+        let Some(name) = rel.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
 
         // OCI whiteouts: .wh.<name> deletes <name>; .wh..wh..opq empties the dir.
         if name == ".wh..wh..opq" {
@@ -249,7 +261,9 @@ fn apply_layer(
             continue;
         }
         if let Some(hidden) = name.strip_prefix(".wh.") {
-            let target = rootfs.join(rel.parent().unwrap_or(Path::new(""))).join(hidden);
+            let target = rootfs
+                .join(rel.parent().unwrap_or(Path::new("")))
+                .join(hidden);
             if target.is_dir() && !target.is_symlink() {
                 let _ = std::fs::remove_dir_all(&target);
             } else {
@@ -280,16 +294,16 @@ pub fn tools_installed() -> bool {
 
 fn find_tool(name: &str) -> Result<PathBuf> {
     let candidates = [
-        format!("/opt/homebrew/opt/e2fsprogs/sbin/{}", name),
-        format!("/opt/homebrew/sbin/{}", name),
-        format!("/usr/local/sbin/{}", name),
+        format!("/opt/homebrew/opt/e2fsprogs/sbin/{name}"),
+        format!("/opt/homebrew/sbin/{name}"),
+        format!("/usr/local/sbin/{name}"),
     ];
     for c in &candidates {
         if Path::new(c).exists() {
             return Ok(PathBuf::from(c));
         }
     }
-    bail!("{} not found — run `moo doctor` for setup instructions", name);
+    bail!("{name} not found — run `moo doctor` for setup instructions");
 }
 
 fn mkfs(rootfs: &Path, out: &Path) -> Result<()> {
@@ -305,7 +319,7 @@ fn mkfs(rootfs: &Path, out: &Path) -> Result<()> {
         .arg("-L")
         .arg("mooroot")
         .arg(out)
-        .arg(format!("{}G", size_gb))
+        .arg(format!("{size_gb}G"))
         .status()
         .context("run filesystem build")?;
     anyhow::ensure!(status.success(), "filesystem build failed");
@@ -320,7 +334,7 @@ fn fix_ownership(img: &Path, rootfs: &Path, owners: &[(PathBuf, u64, u64)]) -> R
     let mut script = String::from("sif / uid 0\nsif / gid 0\n");
     let mut sweep = |path: &Path, uid: u64, gid: u64| {
         let p = format!("/{}", path.display());
-        script.push_str(&format!("sif \"{}\" uid {}\nsif \"{}\" gid {}\n", p, uid, p, gid));
+        script.push_str(&format!("sif \"{p}\" uid {uid}\nsif \"{p}\" gid {gid}\n"));
     };
     walk_relative(rootfs, Path::new(""), &mut |rel| sweep(rel, 0, 0))?;
     for (path, uid, gid) in owners {
@@ -343,11 +357,7 @@ fn fix_ownership(img: &Path, rootfs: &Path, owners: &[(PathBuf, u64, u64)]) -> R
 
 /// Depth-first walk of `dir`, invoking `f` with each path relative to the
 /// walk root. Symlinks are visited, not followed.
-fn walk_relative(
-    root: &Path,
-    rel: &Path,
-    f: &mut impl FnMut(&Path),
-) -> Result<()> {
+fn walk_relative(root: &Path, rel: &Path, f: &mut impl FnMut(&Path)) -> Result<()> {
     for entry in std::fs::read_dir(root.join(rel))? {
         let entry = entry?;
         let child = rel.join(entry.file_name());

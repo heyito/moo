@@ -1,4 +1,5 @@
-//! WP0 spike: prove the kill gate + transport bake-off from mvp-plan.md §4.
+//! WP0 spike: prove the boot + snapshot-restore kill gate and the transport
+//! bake-off that gated the decision to build `moo` at all.
 //!
 //! Commands:
 //!   spike boot <disk.img> -- <cmd> [args...]   boot a machine from an ext4 disk, run cmd
@@ -6,7 +7,8 @@
 //!   spike vsock-bench <base.img> <N>           exec round-trip latency over vsock
 //!   spike serial-bench <base.img> <N>          exec round-trip latency over virtio-serial
 //!
-//! This is throwaway code by design (plan.md M0). No backend names in output.
+//! This is throwaway code by design — a historical feasibility spike kept
+//! for provenance, not product code. No backend names in output.
 
 use std::env;
 use std::ffi::CString;
@@ -52,12 +54,8 @@ extern "C" {
         envp: *const *const c_char,
     ) -> i32;
     fn krun_set_console_output(ctx_id: u32, c_filepath: *const c_char) -> i32;
-    fn krun_add_vsock_port2(
-        ctx_id: u32,
-        port: u32,
-        c_filepath: *const c_char,
-        listen: bool,
-    ) -> i32;
+    fn krun_add_vsock_port2(ctx_id: u32, port: u32, c_filepath: *const c_char, listen: bool)
+        -> i32;
     fn krun_add_virtio_console_multiport(ctx_id: u32) -> i32;
     fn krun_add_console_port_inout(
         ctx_id: u32,
@@ -97,7 +95,7 @@ fn ensure_firmware_loadable() {
     let value = if current.is_empty() {
         FIRMWARE_DIR.to_string()
     } else {
-        format!("{}:{}", current, FIRMWARE_DIR)
+        format!("{current}:{FIRMWARE_DIR}")
     };
     let exe = env::current_exe().expect("current exe");
     let err = std::process::Command::new(exe)
@@ -105,13 +103,13 @@ fn ensure_firmware_loadable() {
         .env(key, value)
         .exec();
     // exec only returns on failure
-    eprintln!("error: relaunch failed: {}", err);
+    eprintln!("error: relaunch failed: {err}");
     exit(1);
 }
 
 fn check(rc: i32, what: &str) {
     if rc < 0 {
-        eprintln!("error: {} failed ({})", what, rc);
+        eprintln!("error: {what} failed ({rc})");
         exit(1);
     }
 }
@@ -210,7 +208,10 @@ fn enter_machine(
                     "exec channel",
                 );
             }
-            Some(AgentTransport::Serial { input_fd, output_fd }) => {
+            Some(AgentTransport::Serial {
+                input_fd,
+                output_fd,
+            }) => {
                 let console_id = krun_add_virtio_console_multiport(ctx);
                 check(console_id, "exec console");
                 let name = cstr(SERIAL_PORT_NAME);
@@ -230,7 +231,10 @@ fn enter_machine(
 
         if let Some(log) = console_log {
             let log_path = cstr(log);
-            check(krun_set_console_output(ctx, log_path.as_ptr()), "console log");
+            check(
+                krun_set_console_output(ctx, log_path.as_ptr()),
+                "console log",
+            );
         }
 
         let workdir = cstr("/");
@@ -252,13 +256,18 @@ fn enter_machine(
         env_ptrs.push(std::ptr::null());
 
         check(
-            krun_set_exec(ctx, exec_path.as_ptr(), arg_ptrs.as_ptr(), env_ptrs.as_ptr()),
+            krun_set_exec(
+                ctx,
+                exec_path.as_ptr(),
+                arg_ptrs.as_ptr(),
+                env_ptrs.as_ptr(),
+            ),
             "set exec",
         );
 
         // Takes over the process; exits with the workload's exit code.
         let rc = krun_start_enter(ctx);
-        eprintln!("error: machine failed to start ({})", rc);
+        eprintln!("error: machine failed to start ({rc})");
         exit(1);
     }
 }
@@ -375,15 +384,22 @@ fn vsock_exec(sock: &str, cmd: &[u8]) -> std::io::Result<(u8, Vec<u8>)> {
 fn cmd_vsock_bench(base: &str, n: usize) {
     let sock = "/tmp/moo-spike-exec.sock";
     let _ = std::fs::remove_file(sock);
-    let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
-    let disk = format!("{}/bench-vsock.img", dir);
+    let dir = Path::new(base)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let disk = format!("{dir}/bench-vsock.img");
     cow_clone(base, &disk);
 
     let t_boot = Instant::now();
     let pid = spawn_machine(
         &disk,
         &agent_argv("--vsock"),
-        Some(AgentTransport::Vsock { host_sock: sock.into() }),
+        Some(AgentTransport::Vsock {
+            host_sock: sock.into(),
+        }),
         Some("/tmp/moo-spike-console.log"),
     );
 
@@ -405,14 +421,18 @@ fn cmd_vsock_bench(base: &str, n: usize) {
         unsafe { libc::kill(pid, libc::SIGKILL) };
         exit(1);
     };
-    println!("machine ready (boot to first exec): {:.1} ms", ready_ms);
+    println!("machine ready (boot to first exec): {ready_ms:.1} ms");
 
     // Real exec semantics: exit codes and output must round-trip.
     let (code, _) = vsock_exec(sock, b"exit 7").expect("exec failed");
     assert_eq!(code, 7, "exit code propagation");
     let (code, out) = vsock_exec(sock, b"echo out; echo err >&2").expect("exec failed");
     assert_eq!(code, 0);
-    assert_eq!(String::from_utf8_lossy(&out), "out\nerr\n", "output capture");
+    assert_eq!(
+        String::from_utf8_lossy(&out),
+        "out\nerr\n",
+        "output capture"
+    );
     println!("exit codes and stdout/stderr round-trip correctly");
 
     let mut samples = Vec::with_capacity(n);
@@ -434,8 +454,13 @@ fn cmd_vsock_bench(base: &str, n: usize) {
 // ---- serial bench ----
 
 fn cmd_serial_bench(base: &str, n: usize) {
-    let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
-    let disk = format!("{}/bench-serial.img", dir);
+    let dir = Path::new(base)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let disk = format!("{dir}/bench-serial.img");
     cow_clone(base, &disk);
 
     // host-to-guest and guest-to-host pipes
@@ -450,7 +475,10 @@ fn cmd_serial_bench(base: &str, n: usize) {
     let pid = spawn_machine(
         &disk,
         &agent_argv("--serial"),
-        Some(AgentTransport::Serial { input_fd: h2g[0], output_fd: g2h[1] }),
+        Some(AgentTransport::Serial {
+            input_fd: h2g[0],
+            output_fd: g2h[1],
+        }),
         Some("/tmp/moo-spike-console.log"),
     );
 
@@ -494,8 +522,13 @@ fn cmd_serial_bench(base: &str, n: usize) {
 // ---- parallel machines smoke test ----
 
 fn cmd_parallel(base: &str, n: usize) {
-    let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
-    println!("== parallel: {} machines, boot + exec + verify + shutdown ==", n);
+    let dir = Path::new(base)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    println!("== parallel: {n} machines, boot + exec + verify + shutdown ==");
     let t_all = Instant::now();
 
     struct Member {
@@ -507,7 +540,7 @@ fn cmd_parallel(base: &str, n: usize) {
     let mut members = Vec::with_capacity(n);
 
     for i in 0..n {
-        let disk = format!("{}/par-{}.img", dir, i);
+        let disk = format!("{dir}/par-{i}.img");
         cow_clone(base, &disk);
         let mut h2g = [0i32; 2];
         let mut g2h = [0i32; 2];
@@ -518,8 +551,11 @@ fn cmd_parallel(base: &str, n: usize) {
         let pid = spawn_machine(
             &disk,
             &agent_argv("--serial"),
-            Some(AgentTransport::Serial { input_fd: h2g[0], output_fd: g2h[1] }),
-            Some(&format!("/tmp/moo-spike-par-{}.log", i)),
+            Some(AgentTransport::Serial {
+                input_fd: h2g[0],
+                output_fd: g2h[1],
+            }),
+            Some(&format!("/tmp/moo-spike-par-{i}.log")),
         );
         unsafe {
             libc::close(h2g[0]);
@@ -533,28 +569,31 @@ fn cmd_parallel(base: &str, n: usize) {
             disk,
         });
     }
-    println!("[spawn] {} machines forked in {:.1} ms", n, t_all.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "[spawn] {} machines forked in {:.1} ms",
+        n,
+        t_all.elapsed().as_secs_f64() * 1000.0
+    );
 
     // Each machine: write a unique marker, read it back. Requests are sent to
     // all machines before any response is awaited, so the guests run
     // concurrently.
     for (i, m) in members.iter_mut().enumerate() {
-        let cmd = format!("echo machine-{} > /whoami && cat /whoami", i);
+        let cmd = format!("echo machine-{i} > /whoami && cat /whoami");
         send_request(&mut m.wr, cmd.as_bytes()).expect("send");
     }
     for (i, m) in members.iter_mut().enumerate() {
         let (code, out) = read_response(&mut m.rd).expect("exec");
-        assert_eq!(code, 0, "machine {} exec failed", i);
-        let expected = format!("machine-{}\n", i);
+        assert_eq!(code, 0, "machine {i} exec failed");
+        let expected = format!("machine-{i}\n");
         assert_eq!(
             String::from_utf8_lossy(&out),
             expected,
-            "machine {} returned wrong identity",
-            i
+            "machine {i} returned wrong identity"
         );
     }
     let ready_ms = t_all.elapsed().as_secs_f64() * 1000.0;
-    println!("[exec] all {} machines answered with distinct state ({:.1} ms total)", n, ready_ms);
+    println!("[exec] all {n} machines answered with distinct state ({ready_ms:.1} ms total)");
 
     for m in members.iter_mut() {
         send_request(&mut m.wr, b"__poweroff__").expect("poweroff send");
@@ -566,29 +605,23 @@ fn cmd_parallel(base: &str, n: usize) {
     }
     println!("[drop] all machines shut down cleanly");
     println!("---");
-    println!(
-        "PARALLEL: PASS ({} machines, {:.1} ms spawn-to-verified)",
-        n, ready_ms
-    );
+    println!("PARALLEL: PASS ({n} machines, {ready_ms:.1} ms spawn-to-verified)");
 }
 
 // ---- end-to-end (M0 exit gate) ----
 
 /// Registry: one line per snapshot, "handle head_sha content_hash".
 fn registry_path(dir: &str) -> String {
-    format!("{}/registry.txt", dir)
+    format!("{dir}/registry.txt")
 }
 
 fn registry_lookup(dir: &str, handle: &str, head_sha: &str) -> Option<String> {
     let content = std::fs::read_to_string(registry_path(dir)).ok()?;
-    content
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let mut parts = line.split_whitespace();
-            let (h, sha, hash) = (parts.next()?, parts.next()?, parts.next()?);
-            (h == handle && sha == head_sha).then(|| hash.to_string())
-        })
+    content.lines().rev().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let (h, sha, hash) = (parts.next()?, parts.next()?, parts.next()?);
+        (h == handle && sha == head_sha).then(|| hash.to_string())
+    })
 }
 
 fn registry_record(dir: &str, handle: &str, head_sha: &str, content_hash: &str) {
@@ -598,7 +631,7 @@ fn registry_record(dir: &str, handle: &str, head_sha: &str, content_hash: &str) 
         .append(true)
         .open(registry_path(dir))
         .expect("open registry");
-    writeln!(f, "{} {} {}", handle, head_sha, content_hash).expect("write registry");
+    writeln!(f, "{handle} {head_sha} {content_hash}").expect("write registry");
 }
 
 fn git_head_sha() -> String {
@@ -627,8 +660,13 @@ fn content_hash(path: &str) -> String {
 }
 
 fn cmd_e2e(base: &str, handle: &str) {
-    let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
-    let snapdir = format!("{}/snapshots", dir);
+    let dir = Path::new(base)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let snapdir = format!("{dir}/snapshots");
     std::fs::create_dir_all(&snapdir).expect("create snapshot dir");
     let live = format!("{}/{}-live.img", dir, handle.replace('/', "-"));
 
@@ -638,18 +676,18 @@ fn cmd_e2e(base: &str, handle: &str) {
 
     // new: fork a live overlay from the base image.
     cow_clone(base, &live);
-    println!("[new] machine '{}' created", handle);
+    println!("[new] machine '{handle}' created");
 
     // run: mutate state with something tied to this commit.
-    let mutation = format!("echo {} > /state-of-commit && sync", head_sha);
+    let mutation = format!("echo {head_sha} > /state-of-commit && sync");
     let (_, ms) = boot_and_run(&live, &sh(&mutation));
-    println!("[run] state mutated inside machine ({:.1} ms)", ms);
+    println!("[run] state mutated inside machine ({ms:.1} ms)");
 
     // save: quiesce (machine already exited), flush, hash, CoW-clone, record.
     let t = Instant::now();
     full_fsync(&live);
     let hash = content_hash(&live);
-    let snap_path = format!("{}/{}", snapdir, hash);
+    let snap_path = format!("{snapdir}/{hash}");
     if !Path::new(&snap_path).exists() {
         cow_clone(&live, &snap_path);
     }
@@ -663,7 +701,7 @@ fn cmd_e2e(base: &str, handle: &str) {
 
     // drop: destroy the live overlay. The snapshot survives.
     std::fs::remove_file(&live).expect("drop live overlay");
-    println!("[drop] machine '{}' destroyed, snapshot kept", handle);
+    println!("[drop] machine '{handle}' destroyed, snapshot kept");
 
     // new again: restore the snapshot recorded for (handle, HEAD).
     let t = Instant::now();
@@ -672,7 +710,7 @@ fn cmd_e2e(base: &str, handle: &str) {
         exit(1);
     });
     let restored = format!("{}/{}-restored.img", dir, handle.replace('/', "-"));
-    cow_clone(&format!("{}/{}", snapdir, found), &restored);
+    cow_clone(&format!("{snapdir}/{found}"), &restored);
     let (out, _) = boot_and_capture(&restored, &sh("cat /state-of-commit"));
     let restore_ms = t.elapsed().as_secs_f64() * 1000.0;
     if !out.contains(&head_sha) {
@@ -695,24 +733,29 @@ fn cmd_e2e(base: &str, handle: &str) {
 // ---- kill gate ----
 
 fn cmd_killgate(base: &str) {
-    let dir = Path::new(base).parent().unwrap().to_str().unwrap().to_string();
-    let work = format!("{}/killgate-live.img", dir);
-    let snap = format!("{}/killgate-snapshot.img", dir);
-    let restored = format!("{}/killgate-restored.img", dir);
+    let dir = Path::new(base)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let work = format!("{dir}/killgate-live.img");
+    let snap = format!("{dir}/killgate-snapshot.img");
+    let restored = format!("{dir}/killgate-restored.img");
 
     println!("== kill gate: machine boot + CoW snapshot restore, target < 2000 ms ==");
 
     // 1. Fork a live overlay from the base image.
     let clone_ms = cow_clone(base, &work);
-    println!("[1] fork live overlay from base       {:>8.1} ms", clone_ms);
+    println!("[1] fork live overlay from base       {clone_ms:>8.1} ms");
 
     // 2. Boot it and mutate state (write a marker file).
     let (code, boot1_ms) = boot_and_run(&work, &sh("echo moo-was-here > /marker && sync"));
     if code != 0 {
-        eprintln!("error: state mutation run exited {}", code);
+        eprintln!("error: state mutation run exited {code}");
         exit(1);
     }
-    println!("[2] boot + mutate state + shutdown    {:>8.1} ms", boot1_ms);
+    println!("[2] boot + mutate state + shutdown    {boot1_ms:>8.1} ms");
 
     // 3. Save: flush to physical disk, then CoW-clone the overlay (quiesced:
     //    the machine has exited, so this is the sealed-clone path).
@@ -731,8 +774,8 @@ fn cmd_killgate(base: &str) {
     //    Verify via console output — init exit codes do not propagate.
     let restore_ms = cow_clone(&snap, &restored);
     let (out, boot2_ms) = boot_and_capture(&restored, &sh("cat /marker"));
-    println!("[4] restore clone                     {:>8.1} ms", restore_ms);
-    println!("[5] boot restored + verify state      {:>8.1} ms", boot2_ms);
+    println!("[4] restore clone                     {restore_ms:>8.1} ms");
+    println!("[5] boot restored + verify state      {boot2_ms:>8.1} ms");
     if !out.contains("moo-was-here") {
         eprintln!("FAIL: restored machine is missing the saved state");
         exit(1);
@@ -741,11 +784,11 @@ fn cmd_killgate(base: &str) {
     let gate_ms = restore_ms + boot2_ms;
     println!("---");
     println!("state verified: marker written before save is present after restore");
-    println!("gate total (restore + boot):          {:>8.1} ms", gate_ms);
+    println!("gate total (restore + boot):          {gate_ms:>8.1} ms");
     if gate_ms < 2000.0 {
-        println!("KILL GATE: PASS ({:.1} ms < 2000 ms)", gate_ms);
+        println!("KILL GATE: PASS ({gate_ms:.1} ms < 2000 ms)");
     } else {
-        println!("KILL GATE: FAIL ({:.1} ms >= 2000 ms)", gate_ms);
+        println!("KILL GATE: FAIL ({gate_ms:.1} ms >= 2000 ms)");
         exit(1);
     }
 }
@@ -765,7 +808,7 @@ fn main() {
                 usage();
             }
             let (code, ms) = boot_and_run(disk, &cmd);
-            eprintln!("(machine lifecycle: {:.1} ms, guest exit {})", ms, code);
+            eprintln!("(machine lifecycle: {ms:.1} ms, guest exit {code})");
             exit(code);
         }
         Some("killgate") => {

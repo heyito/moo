@@ -37,8 +37,7 @@ const GUEST_MAC: [u8; 6] = [0x5a, 0x94, 0xef, 0xe4, 0x0c, 0xee];
 
 // virtio-net feature bits (uapi/linux/virtio_net.h) matching the proxy's
 // expectations: checksum offload + TSO/UFO in both directions.
-const NET_FEATURES: u32 =
-    (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14);
+const NET_FEATURES: u32 = (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14);
 /// The proxy expects a magic handshake after connecting (vfkit-compatible).
 const NET_FLAG_HANDSHAKE: u32 = 1 << 0;
 
@@ -128,7 +127,7 @@ pub fn loader_path_value() -> String {
             if cur.split(':').any(|p| p == FIRMWARE_DIR) {
                 cur
             } else {
-                format!("{}:{}", cur, FIRMWARE_DIR)
+                format!("{cur}:{FIRMWARE_DIR}")
             }
         }
         _ => FIRMWARE_DIR.to_string(),
@@ -157,7 +156,7 @@ fn cstr(s: &str) -> CString {
 
 fn check(rc: i32, what: &str) -> Result<()> {
     if rc < 0 {
-        bail!("machine engine rejected {} ({})", what, rc);
+        bail!("machine engine rejected {what} ({rc})");
     }
     Ok(())
 }
@@ -233,7 +232,10 @@ pub fn enter(cfg: &MachineConfig) -> Result<()> {
         )?;
 
         let log_path = cstr(cfg.console_log);
-        check(krun_set_console_output(ctx, log_path.as_ptr()), "console log")?;
+        check(
+            krun_set_console_output(ctx, log_path.as_ptr()),
+            "console log",
+        )?;
 
         let workdir = cstr("/");
         check(krun_set_workdir(ctx, workdir.as_ptr()), "workdir")?;
@@ -253,11 +255,16 @@ pub fn enter(cfg: &MachineConfig) -> Result<()> {
             std::ptr::null(),
         ];
         check(
-            krun_set_exec(ctx, exec_path.as_ptr(), arg_ptrs.as_ptr(), env_ptrs.as_ptr()),
+            krun_set_exec(
+                ctx,
+                exec_path.as_ptr(),
+                arg_ptrs.as_ptr(),
+                env_ptrs.as_ptr(),
+            ),
             "agent",
         )?;
 
         let rc = krun_start_enter(ctx);
-        bail!("machine failed to start ({})", rc);
+        bail!("machine failed to start ({rc})");
     }
 }

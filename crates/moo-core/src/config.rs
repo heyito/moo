@@ -1,4 +1,4 @@
-//! `moo.toml` — the project configuration (plan.md §9). Records the base
+//! `moo.toml` — the project configuration. Records the base
 //! image reference and the recipe inputs whose hash becomes the golden-image
 //! identity, plus resources, exposed ports, and quiesce commands. No
 //! services, no health checks, no volumes.
@@ -44,16 +44,11 @@ pub struct Recipe {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct Resources {
     pub cpus: Option<u8>,
     /// e.g. "4GiB", "2048MiB", or a bare MiB count.
     pub memory: Option<String>,
-}
-
-impl Default for Resources {
-    fn default() -> Self {
-        Self { cpus: None, memory: None }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -92,8 +87,8 @@ impl MooToml {
         self.project.workdir.as_deref().unwrap_or(DEFAULT_WORKDIR)
     }
 
-    /// The golden-image identity: hash(base + lockfile contents + resources)
-    /// per plan.md §9. Two developers with the same inputs get the same hash.
+    /// The golden-image identity: hash(base + lockfile contents + resources).
+    /// Two developers with the same inputs get the same hash.
     pub fn recipe_hash(&self, project_root: &std::path::Path) -> String {
         let mut hasher = blake3::Hasher::new();
         // Guest-agent protocol version: images embed the agent, so a protocol
@@ -136,9 +131,7 @@ pub fn load() -> Result<(MooToml, PathBuf)> {
     if !path.exists() {
         return Ok((MooToml::default(), root));
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let cfg: MooToml = toml::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let cfg: MooToml = toml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok((cfg, root))
 }

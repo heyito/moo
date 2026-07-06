@@ -1,5 +1,5 @@
 #!/bin/bash
-# Demo 2 (mvp-plan.md §2): the five-tool stack replaced. N machines run the
+# Demo 2: the five-tool stack replaced. N machines run the
 # same service on the same guest port with their own state — no port-offset
 # scripts, no .env symlinks, no DB-per-branch tool, no compose hacks.
 set -euo pipefail
