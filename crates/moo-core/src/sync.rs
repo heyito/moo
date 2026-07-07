@@ -34,15 +34,18 @@ pub const AGENT_PROTO_VERSION: u8 = 4;
 /// is buffered in memory on both sides.
 const MAX_SYNC_BYTES: usize = 512 * 1024 * 1024;
 
-fn sync_state_path(handle: &str) -> PathBuf {
-    runtime_dir().join(format!("{}.syncstate", shim::sanitize(handle)))
+fn sync_state_path(project_root: &str, handle: &str) -> PathBuf {
+    runtime_dir().join(format!(
+        "{}.syncstate",
+        shim::runtime_name(project_root, handle)
+    ))
 }
 
 /// Forget the last-synced fingerprint. Called whenever the guest tree may
 /// have changed out from under the host (machine created, restored from a
 /// snapshot, or dropped) so the next sync is unconditional.
-pub fn invalidate(handle: &str) {
-    let _ = std::fs::remove_file(sync_state_path(handle));
+pub fn invalidate(project_root: &str, handle: &str) {
+    let _ = std::fs::remove_file(sync_state_path(project_root, handle));
 }
 
 /// The files `git status` would call "your work": tracked + untracked
@@ -140,7 +143,7 @@ pub fn sync_into(machine: &Machine) -> Result<Option<SyncOutcome>> {
 
     let files = worktree_files(&root)?;
     let print = fingerprint(&root, &files);
-    let state_path = sync_state_path(&machine.handle);
+    let state_path = sync_state_path(&machine.project_root, &machine.handle);
     if std::fs::read_to_string(&state_path).ok().as_deref() == Some(print.as_str()) {
         return Ok(None);
     }
@@ -151,7 +154,7 @@ pub fn sync_into(machine: &Machine) -> Result<Option<SyncOutcome>> {
     let bytes = payload.len();
     let frame = moo_vmm::proto::synctree_frame(&workdir, &payload);
 
-    let (code, out) = shim::request(&machine.handle, &frame)
+    let (code, out) = shim::request(&machine.project_root, &machine.handle, &frame)
         .with_context(|| format!("sync working tree into '{}'", machine.handle))?;
     if code != 0 {
         bail!(

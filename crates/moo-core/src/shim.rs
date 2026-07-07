@@ -16,29 +16,45 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub fn socket_path(handle: &str) -> PathBuf {
-    runtime_dir().join(format!("{}.sock", sanitize(handle)))
+/// Filesystem-safe, host-unique name for one machine's runtime artifacts.
+/// Handles are unique per repository, not globally, so the name carries a
+/// short digest of the machine's repository scope.
+pub fn runtime_name(project_root: &str, handle: &str) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(project_root.as_bytes());
+    let tag = h.finalize().to_hex();
+    format!("{}-{}", &tag.as_str()[..8], sanitize(handle))
 }
 
-pub fn pid_path(handle: &str) -> PathBuf {
-    runtime_dir().join(format!("{}.pid", sanitize(handle)))
+pub fn socket_path(project_root: &str, handle: &str) -> PathBuf {
+    runtime_dir().join(format!("{}.sock", runtime_name(project_root, handle)))
 }
 
-pub fn console_log_path(handle: &str) -> PathBuf {
-    runtime_dir().join(format!("{}.console.log", sanitize(handle)))
+pub fn pid_path(project_root: &str, handle: &str) -> PathBuf {
+    runtime_dir().join(format!("{}.pid", runtime_name(project_root, handle)))
+}
+
+pub fn console_log_path(project_root: &str, handle: &str) -> PathBuf {
+    runtime_dir().join(format!(
+        "{}.console.log",
+        runtime_name(project_root, handle)
+    ))
 }
 
 // The network proxy parses its socket arguments as URLs and decodes
 // percent-escapes, so these paths must not contain '%' (a "%2F" would be
 // decoded back to '/' and bind in a nonexistent directory).
-pub(crate) fn net_socket_path(handle: &str) -> PathBuf {
-    runtime_dir().join(format!("{}.net.sock", sanitize(handle).replace('%', "_")))
+pub(crate) fn net_socket_path(project_root: &str, handle: &str) -> PathBuf {
+    runtime_dir().join(format!(
+        "{}.net.sock",
+        runtime_name(project_root, handle).replace('%', "_")
+    ))
 }
 
-pub(crate) fn net_api_path(handle: &str) -> PathBuf {
+pub(crate) fn net_api_path(project_root: &str, handle: &str) -> PathBuf {
     runtime_dir().join(format!(
         "{}.net.api.sock",
-        sanitize(handle).replace('%', "_")
+        runtime_name(project_root, handle).replace('%', "_")
     ))
 }
 
@@ -49,11 +65,11 @@ pub fn sanitize(handle: &str) -> String {
 /// Start this machine's private network proxy and wait for its sockets.
 /// One instance per machine: each guest gets its own network, so identical
 /// guest addressing never collides across machines.
-fn start_net_proxy(handle: &str) -> Result<std::process::Child> {
+fn start_net_proxy(project_root: &str, handle: &str) -> Result<std::process::Child> {
     let bin = moo_vmm::net_proxy_path()
         .context("machine network runtime is missing — re-run scripts/install.sh")?;
-    let net_sock = net_socket_path(handle);
-    let api_sock = net_api_path(handle);
+    let net_sock = net_socket_path(project_root, handle);
+    let api_sock = net_api_path(project_root, handle);
     let _ = std::fs::remove_file(&net_sock);
     let _ = std::fs::remove_file(&api_sock);
 
@@ -105,8 +121,8 @@ fn net_api_post(api_sock: &Path, path: &str, body: &str) -> Result<()> {
 
 /// Publish each "host:guest" pair: host 127.0.0.1:<host> forwards to the
 /// guest's address inside its private network.
-fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
-    let api = net_api_path(handle);
+fn expose_ports(project_root: &str, handle: &str, port_map: &[String]) -> Result<()> {
+    let api = net_api_path(project_root, handle);
     for pair in port_map {
         let Some((host, guest)) = pair.split_once(':') else {
             continue;
@@ -127,9 +143,9 @@ fn expose_ports(handle: &str, port_map: &[String]) -> Result<()> {
 /// powers off. The caller (moo new) has already set the loader path so the
 /// forked guest can find its firmware. Everything else about the machine
 /// (overlay, resources, ports) comes from its registry row.
-pub fn run(handle: &str) -> Result<()> {
+pub fn run(project_root: &str, handle: &str) -> Result<()> {
     let machine = Registry::open()?
-        .get_machine(handle)?
+        .get_machine(project_root, handle)?
         .with_context(|| format!("no machine '{handle}'"))?;
     let overlay = machine.overlay_path.clone();
     let port_map: Vec<String> = machine
@@ -140,7 +156,7 @@ pub fn run(handle: &str) -> Result<()> {
         .collect();
 
     std::fs::create_dir_all(runtime_dir())?;
-    let sock = socket_path(handle);
+    let sock = socket_path(project_root, handle);
     let _ = std::fs::remove_file(&sock);
 
     // Detach from the caller's session so the machine outlives the CLI call.
@@ -149,10 +165,10 @@ pub fn run(handle: &str) -> Result<()> {
     unsafe { libc::setsid() };
 
     // The machine's private network: proxy first, then port forwards.
-    let net_proxy = start_net_proxy(handle)?;
+    let net_proxy = start_net_proxy(project_root, handle)?;
     let net_proxy_pid = net_proxy.id() as i32;
-    expose_ports(handle, &port_map)?;
-    let net_socket = net_socket_path(handle);
+    expose_ports(project_root, handle, &port_map)?;
+    let net_socket = net_socket_path(project_root, handle);
 
     // Serial channel: host-to-guest and guest-to-host pipes.
     let mut h2g = [0i32; 2];
@@ -162,7 +178,7 @@ pub fn run(handle: &str) -> Result<()> {
         anyhow::ensure!(libc::pipe(g2h.as_mut_ptr()) == 0, "pipe failed");
     }
 
-    let console_log = console_log_path(handle);
+    let console_log = console_log_path(project_root, handle);
     let vmm_pid = unsafe { libc::fork() };
     anyhow::ensure!(vmm_pid >= 0, "fork failed");
     if vmm_pid == 0 {
@@ -193,28 +209,32 @@ pub fn run(handle: &str) -> Result<()> {
     let mut guest_in = unsafe { std::fs::File::from_raw_fd(h2g[1]) };
     let mut guest_out = unsafe { std::fs::File::from_raw_fd(g2h[0]) };
 
-    std::fs::write(pid_path(handle), format!("{}\n", std::process::id()))?;
+    std::fs::write(
+        pid_path(project_root, handle),
+        format!("{}\n", std::process::id()),
+    )?;
     let listener = UnixListener::bind(&sock).context("bind machine socket")?;
 
     // Reap the guest and exit the shim when it powers off. The network
     // proxy is part of the machine: it goes down with the guest.
     let handle_owned = handle.to_string();
+    let root_owned = project_root.to_string();
     std::thread::spawn(move || {
         let mut status = 0i32;
         unsafe { libc::waitpid(vmm_pid, &mut status, 0) };
         unsafe { libc::kill(net_proxy_pid, libc::SIGTERM) };
-        let _ = std::fs::remove_file(socket_path(&handle_owned));
-        let _ = std::fs::remove_file(pid_path(&handle_owned));
-        let _ = std::fs::remove_file(net_socket_path(&handle_owned));
-        let _ = std::fs::remove_file(net_api_path(&handle_owned));
+        let _ = std::fs::remove_file(socket_path(&root_owned, &handle_owned));
+        let _ = std::fs::remove_file(pid_path(&root_owned, &handle_owned));
+        let _ = std::fs::remove_file(net_socket_path(&root_owned, &handle_owned));
+        let _ = std::fs::remove_file(net_api_path(&root_owned, &handle_owned));
         if let Ok(reg) = Registry::open() {
-            let _ = reg.set_lifecycle(&handle_owned, "sealed");
+            let _ = reg.set_lifecycle(&root_owned, &handle_owned, "sealed");
         }
         std::process::exit(0);
     });
 
     if let Ok(reg) = Registry::open() {
-        let _ = reg.set_lifecycle(handle, "live");
+        let _ = reg.set_lifecycle(project_root, handle, "live");
     }
 
     // One request/response per connection, strictly serialized — the serial
@@ -241,8 +261,8 @@ pub fn run(handle: &str) -> Result<()> {
 }
 
 /// Client side: send one command to a running machine's shim.
-pub fn request(handle: &str, cmd: &[u8]) -> Result<(u8, Vec<u8>)> {
-    let sock = socket_path(handle);
+pub fn request(project_root: &str, handle: &str, cmd: &[u8]) -> Result<(u8, Vec<u8>)> {
+    let sock = socket_path(project_root, handle);
     let mut conn = std::os::unix::net::UnixStream::connect(&sock)
         .with_context(|| format!("machine '{handle}' is not running"))?;
     proto::send_request(&mut conn, cmd)?;
@@ -250,6 +270,6 @@ pub fn request(handle: &str, cmd: &[u8]) -> Result<(u8, Vec<u8>)> {
 }
 
 /// True if the machine's supervisor socket accepts connections.
-pub fn is_running(handle: &str) -> bool {
-    std::os::unix::net::UnixStream::connect(socket_path(handle)).is_ok()
+pub fn is_running(project_root: &str, handle: &str) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path(project_root, handle)).is_ok()
 }

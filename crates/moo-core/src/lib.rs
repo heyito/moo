@@ -11,25 +11,34 @@ use moo_store::{cow_clone, machines_dir, save_snapshot, timestamp, Machine, Regi
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-fn overlay_path(handle: &str) -> PathBuf {
-    machines_dir().join(format!("{}.img", shim::sanitize(handle)))
+/// The current repository scope: machines belong to the repository they
+/// were created from. Empty string = created outside any repository.
+pub fn scope() -> String {
+    git::toplevel()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn overlay_path(project_root: &str, handle: &str) -> PathBuf {
+    machines_dir().join(format!("{}.img", shim::runtime_name(project_root, handle)))
 }
 
 /// Spawn the detached supervisor for `handle` and wait for its socket.
-fn boot(handle: &str) -> Result<()> {
+fn boot(project_root: &str, handle: &str) -> Result<()> {
     let exe = std::env::current_exe().context("locate own binary")?;
     // Internal debug: keep the supervisor's stderr when engine logging is on.
     let stderr = if std::env::var("MOO_ENGINE_LOG").is_ok() {
-        let f = std::fs::File::create(
-            moo_store::runtime_dir().join(format!("{}.engine.log", shim::sanitize(handle))),
-        )?;
+        let f = std::fs::File::create(moo_store::runtime_dir().join(format!(
+            "{}.engine.log",
+            shim::runtime_name(project_root, handle)
+        )))?;
         std::process::Stdio::from(f)
     } else {
         std::process::Stdio::null()
     };
     std::fs::create_dir_all(moo_store::runtime_dir())?;
     std::process::Command::new(exe)
-        .args(["__shim", handle])
+        .args(["__shim", handle, project_root])
         .env(moo_vmm::LOADER_PATH_VAR, moo_vmm::loader_path_value())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -39,7 +48,7 @@ fn boot(handle: &str) -> Result<()> {
 
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(10) {
-        if shim::is_running(handle) {
+        if shim::is_running(project_root, handle) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -51,13 +60,15 @@ fn boot(handle: &str) -> Result<()> {
 /// The candidate derives from a stable hash of
 /// (handle, guest port); collisions with ports already in use on the host
 /// probe forward until a free one is found.
-fn allocate_ports(handle: &str, guest_ports: &[u16]) -> Vec<(u16, u16)> {
+fn allocate_ports(project_root: &str, handle: &str, guest_ports: &[u16]) -> Vec<(u16, u16)> {
     const RANGE_START: u32 = 20000;
     const RANGE_LEN: u32 = 10000;
     let mut taken: Vec<u16> = Vec::new();
     let mut map = Vec::new();
     for &guest in guest_ports {
         let mut h = blake3::Hasher::new();
+        h.update(project_root.as_bytes());
+        h.update(&[0]);
         h.update(handle.as_bytes());
         h.update(&guest.to_le_bytes());
         let seed = u32::from_le_bytes(h.finalize().as_bytes()[..4].try_into().unwrap());
@@ -85,14 +96,14 @@ fn format_port_map(map: &[(u16, u16)]) -> String {
 }
 
 /// Stop a running machine gracefully (quiesce + power off) and wait.
-fn stop(handle: &str) -> Result<()> {
-    if !shim::is_running(handle) {
+fn stop(project_root: &str, handle: &str) -> Result<()> {
+    if !shim::is_running(project_root, handle) {
         return Ok(());
     }
-    let _ = shim::request(handle, moo_vmm::proto::POWEROFF);
+    let _ = shim::request(project_root, handle, moo_vmm::proto::POWEROFF);
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(10) {
-        if !shim::socket_path(handle).exists() {
+        if !shim::socket_path(project_root, handle).exists() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -112,41 +123,44 @@ pub struct NewOutcome {
 /// The guest tree may differ from anything the host remembers after a
 /// create/restore — force the next sync and run it now if the caller is
 /// inside the machine's repository.
-fn sync_after_new(reg: &Registry, name: &str) -> Result<Option<sync::SyncOutcome>> {
-    sync::invalidate(name);
-    let Some(machine) = reg.get_machine(name)? else {
+fn sync_after_new(reg: &Registry, root: &str, name: &str) -> Result<Option<sync::SyncOutcome>> {
+    sync::invalidate(root, name);
+    let Some(machine) = reg.get_machine(root, name)? else {
         return Ok(None);
     };
     sync::sync_into(&machine)
 }
 
-/// `moo new <name> [from <src>]` — idempotent create/restore.
+/// `moo new <name> [from <src>]` — idempotent create/restore. Handles are
+/// scoped to the current repository: `base` here and `base` in another
+/// repository are different machines.
 pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<NewOutcome> {
     let reg = Registry::open()?;
+    let root = scope();
     std::fs::create_dir_all(machines_dir())?;
 
-    if let Some(existing) = reg.get_machine(name)? {
+    if let Some(existing) = reg.get_machine(&root, name)? {
         // Existing handle: prefer the snapshot saved for the current HEAD of
         // the shadowed ref; otherwise reuse the live overlay.
         let head = git::shadowed_head(name);
         let snap = match &head {
-            Some(sha) => reg.find_snapshot(name, sha)?,
+            Some(sha) => reg.find_snapshot(&root, name, sha)?,
             None => None,
         };
         let overlay = PathBuf::from(&existing.overlay_path);
 
         if let Some(snap) = snap {
             let live_hash_matches = overlay.exists()
-                && !shim::is_running(name)
+                && !shim::is_running(&root, name)
                 && moo_store::content_hash(&overlay)? == snap.content_hash;
             if !live_hash_matches {
-                stop(name)?;
+                stop(&root, name)?;
                 if overlay.exists() {
                     std::fs::remove_file(&overlay)?;
                 }
                 cow_clone(Path::new(&snap.snapshot_path), &overlay)?;
-                boot(name)?;
-                let synced = sync_after_new(&reg, name)?;
+                boot(&root, name)?;
+                let synced = sync_after_new(&reg, &root, name)?;
                 return Ok(NewOutcome {
                     handle: name.to_string(),
                     restored_from: Some(snap),
@@ -155,10 +169,10 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
                 });
             }
         }
-        if !shim::is_running(name) {
-            boot(name)?;
+        if !shim::is_running(&root, name) {
+            boot(&root, name)?;
         }
-        let synced = sync_after_new(&reg, name)?;
+        let synced = sync_after_new(&reg, &root, name)?;
         return Ok(NewOutcome {
             handle: name.to_string(),
             restored_from: None,
@@ -169,8 +183,8 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
 
     // New handle: resolve the source into a disk to clone. The golden image
     // is built on first use for this project's recipe.
-    let (cfg, root) = config::load()?;
-    let base_image = image::ensure(&cfg, &root)?;
+    let (cfg, cfg_root) = config::load()?;
+    let base_image = image::ensure(&cfg, &cfg_root)?;
     let mut restored_from = None;
     let (source_disk, base_commit, parent): (PathBuf, Option<String>, Option<String>) = match from {
         Some(src) if src.starts_with("s_") => {
@@ -183,10 +197,10 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
             (path, sha, None)
         }
         Some(src) => {
-            if let Some(other) = reg.get_machine(src)? {
-                // Fork another machine: quiesce it first.
-                if shim::is_running(src) {
-                    let (code, _) = shim::request(src, moo_vmm::proto::QUIESCE)?;
+            if let Some(other) = reg.get_machine(&root, src)? {
+                // Fork another machine in this repository: quiesce it first.
+                if shim::is_running(&root, src) {
+                    let (code, _) = shim::request(&root, src, moo_vmm::proto::QUIESCE)?;
                     anyhow::ensure!(code == 0, "could not quiesce machine '{src}'");
                 }
                 moo_store::full_fsync(Path::new(&other.overlay_path))?;
@@ -198,7 +212,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
             } else if let Some(sha) = git::resolve(src) {
                 // A commit-ish: restore this handle's snapshot for that
                 // SHA if one exists, else start from the base image.
-                match reg.find_snapshot(name, &sha)? {
+                match reg.find_snapshot(&root, name, &sha)? {
                     Some(snap) => {
                         let path = PathBuf::from(&snap.snapshot_path);
                         restored_from = Some(snap);
@@ -215,7 +229,7 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
             // the SHA it shadows now, if any.
             let head = git::shadowed_head(name);
             match &head {
-                Some(sha) => match reg.find_snapshot(name, sha)? {
+                Some(sha) => match reg.find_snapshot(&root, name, sha)? {
                     Some(snap) => {
                         let path = PathBuf::from(&snap.snapshot_path);
                         restored_from = Some(snap);
@@ -228,18 +242,18 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
         }
     };
 
-    let overlay = overlay_path(name);
+    let overlay = overlay_path(&root, name);
     if overlay.exists() {
         std::fs::remove_file(&overlay)?;
     }
     cow_clone(&source_disk, &overlay)?;
 
-    let port_map = allocate_ports(name, &cfg.network.ports);
+    let port_map = allocate_ports(&root, name, &cfg.network.ports);
 
     reg.insert_machine(&Machine {
         handle: name.to_string(),
         base_commit,
-        recipe_hash: cfg.recipe_hash(&root),
+        recipe_hash: cfg.recipe_hash(&cfg_root),
         parent_machine: parent,
         base_image_path: base_image.to_string_lossy().into_owned(),
         overlay_path: overlay.to_string_lossy().into_owned(),
@@ -249,13 +263,11 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
         cpus: cfg.cpus(),
         ram_mib: cfg.ram_mib(),
         port_map: format_port_map(&port_map),
-        project_root: git::toplevel()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        project_root: root.clone(),
     })?;
 
-    boot(name)?;
-    let synced = sync_after_new(&reg, name)?;
+    boot(&root, name)?;
+    let synced = sync_after_new(&reg, &root, name)?;
     Ok(NewOutcome {
         handle: name.to_string(),
         restored_from,
@@ -269,12 +281,13 @@ pub fn new_machine(name: &str, from: Option<&str>, detached: bool) -> Result<New
 /// repository, any host-side change is synced in before the command runs.
 pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
     let reg = Registry::open()?;
-    let Some(machine) = reg.get_machine(name)? else {
+    let root = scope();
+    let Some(machine) = reg.get_machine(&root, name)? else {
         bail!("no machine '{name}' — create it with `moo new {name}`");
     };
-    if !shim::is_running(name) {
+    if !shim::is_running(&root, name) {
         // Machines persist between invocations; reboot the live overlay.
-        boot(name)?;
+        boot(&root, name)?;
     }
     if let Some(s) = sync::sync_into(&machine)? {
         eprintln!(
@@ -284,7 +297,7 @@ pub fn run_in_machine(name: &str, cmd: &str) -> Result<(u8, Vec<u8>)> {
             s.workdir
         );
     }
-    shim::request(name, cmd.as_bytes())
+    shim::request(&root, name, cmd.as_bytes())
 }
 
 pub struct SaveOutcome {
@@ -295,16 +308,22 @@ pub struct SaveOutcome {
 /// `moo save <name>` — quiesce, snapshot, associate with HEAD.
 pub fn save_machine(name: &str) -> Result<SaveOutcome> {
     let reg = Registry::open()?;
+    let root = scope();
     let m = reg
-        .get_machine(name)?
+        .get_machine(&root, name)?
         .with_context(|| format!("no machine '{name}'"))?;
+    save_machine_row(&reg, &m)
+}
 
-    if shim::is_running(name) {
+fn save_machine_row(reg: &Registry, m: &Machine) -> Result<SaveOutcome> {
+    let root = m.project_root.as_str();
+    let name = m.handle.as_str();
+    if shim::is_running(root, name) {
         // Project-defined quiesce commands (DB checkpoints etc.) run first,
         // then the built-in filesystem sync.
         let (cfg, _) = config::load()?;
         for cmd in &cfg.quiesce.commands {
-            let (code, out) = shim::request(name, cmd.as_bytes())?;
+            let (code, out) = shim::request(root, name, cmd.as_bytes())?;
             if code != 0 {
                 eprintln!(
                     "moo: warning: quiesce command failed in '{}' (exit {}): {}",
@@ -314,7 +333,7 @@ pub fn save_machine(name: &str) -> Result<SaveOutcome> {
                 );
             }
         }
-        let (code, out) = shim::request(name, moo_vmm::proto::QUIESCE)?;
+        let (code, out) = shim::request(root, name, moo_vmm::proto::QUIESCE)?;
         if code != 0 {
             bail!(
                 "could not quiesce machine '{}': {}",
@@ -329,16 +348,21 @@ pub fn save_machine(name: &str) -> Result<SaveOutcome> {
     } else {
         git::shadowed_head(name)
     };
-    let (snapshot, fresh) = save_snapshot(&reg, name, head.as_deref(), Path::new(&m.overlay_path))?;
+    let (snapshot, fresh) =
+        save_snapshot(reg, root, name, head.as_deref(), Path::new(&m.overlay_path))?;
     Ok(SaveOutcome { snapshot, fresh })
 }
 
-/// `moo save` with no name — save every registered machine.
+/// `moo save` with no name — save every machine of the current repository.
 pub fn save_all() -> Result<Vec<(String, SaveOutcome)>> {
     let reg = Registry::open()?;
+    let root = scope();
     let mut results = Vec::new();
     for m in reg.list_machines()? {
-        let outcome = save_machine(&m.handle)?;
+        if m.project_root != root {
+            continue;
+        }
+        let outcome = save_machine_row(&reg, &m)?;
         results.push((m.handle, outcome));
     }
     Ok(results)
@@ -348,36 +372,37 @@ pub fn save_all() -> Result<Vec<(String, SaveOutcome)>> {
 /// `drop_snapshots`. Idempotent.
 pub fn drop_machine(name: &str, force: bool, drop_snapshots: bool) -> Result<()> {
     let reg = Registry::open()?;
+    let root = scope();
 
-    if shim::is_running(name) {
+    if shim::is_running(&root, name) {
         if force {
-            if let Ok(pid_str) = std::fs::read_to_string(shim::pid_path(name)) {
+            if let Ok(pid_str) = std::fs::read_to_string(shim::pid_path(&root, name)) {
                 if let Ok(pid) = pid_str.trim().parse::<i32>() {
                     // The supervisor leads its own process group (setsid);
                     // this takes the guest down with it.
                     unsafe { libc::kill(-pid, libc::SIGKILL) };
                 }
             }
-            let _ = std::fs::remove_file(shim::socket_path(name));
-            let _ = std::fs::remove_file(shim::pid_path(name));
-            let _ = std::fs::remove_file(shim::net_socket_path(name));
-            let _ = std::fs::remove_file(shim::net_api_path(name));
+            let _ = std::fs::remove_file(shim::socket_path(&root, name));
+            let _ = std::fs::remove_file(shim::pid_path(&root, name));
+            let _ = std::fs::remove_file(shim::net_socket_path(&root, name));
+            let _ = std::fs::remove_file(shim::net_api_path(&root, name));
         } else {
-            stop(name)?;
+            stop(&root, name)?;
         }
     }
 
-    if let Some(m) = reg.get_machine(name)? {
+    if let Some(m) = reg.get_machine(&root, name)? {
         let overlay = PathBuf::from(&m.overlay_path);
         if overlay.exists() {
             std::fs::remove_file(&overlay)?;
         }
-        reg.remove_machine(name)?;
+        reg.remove_machine(&root, name)?;
     }
-    sync::invalidate(name);
+    sync::invalidate(&root, name);
 
     if drop_snapshots {
-        let removed = reg.remove_snapshots(name)?;
+        let removed = reg.remove_snapshots(&root, name)?;
         for snap in removed {
             // Content files are shared across handles; only delete when the
             // last reference is gone.
@@ -395,13 +420,14 @@ pub struct LsRow {
     pub snapshots: Vec<Snapshot>,
 }
 
-/// `moo ls` — read-only listing.
+/// `moo ls` — read-only listing of every machine on this host, across all
+/// repositories.
 pub fn list() -> Result<Vec<LsRow>> {
     let reg = Registry::open()?;
     let mut rows = Vec::new();
     for m in reg.list_machines()? {
-        let running = shim::is_running(&m.handle);
-        let snapshots = reg.list_snapshots(Some(&m.handle))?;
+        let running = shim::is_running(&m.project_root, &m.handle);
+        let snapshots = reg.list_snapshots(&m.project_root, &m.handle)?;
         rows.push(LsRow {
             machine: m,
             running,
@@ -411,13 +437,18 @@ pub fn list() -> Result<Vec<LsRow>> {
     Ok(rows)
 }
 
+/// True if the named machine of the current repository scope is running.
+pub fn machine_is_running(name: &str) -> bool {
+    shim::is_running(&scope(), name)
+}
+
 /// `moo open` — resolve the host port forwarded to a machine's guest port
 /// (admin, read-only). With no guest port, resolves only when
 /// the machine forwards exactly one port.
 pub fn resolve_host_port(name: &str, guest_port: Option<u16>) -> Result<u16> {
     let reg = Registry::open()?;
     let m = reg
-        .get_machine(name)?
+        .get_machine(&scope(), name)?
         .with_context(|| format!("no machine '{name}' — create it with `moo new {name}`"))?;
 
     let map: Vec<(u16, u16)> = m

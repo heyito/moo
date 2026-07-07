@@ -116,6 +116,8 @@ pub struct Machine {
 pub struct Snapshot {
     pub snapshot_id: String,
     pub handle: String,
+    /// Repository the owning machine belonged to. Empty = no repo.
+    pub project_root: String,
     pub head_sha: Option<String>,
     pub snapshot_path: String,
     pub content_hash: String,
@@ -139,7 +141,7 @@ impl Registry {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS machines (
-                 handle          TEXT PRIMARY KEY,
+                 handle          TEXT NOT NULL,
                  base_commit     TEXT,
                  recipe_hash     TEXT NOT NULL,
                  parent_machine  TEXT,
@@ -150,18 +152,19 @@ impl Registry {
                  created_at      INTEGER NOT NULL,
                  cpus            INTEGER NOT NULL DEFAULT 2,
                  ram_mib         INTEGER NOT NULL DEFAULT 4096,
-                 port_map        TEXT NOT NULL DEFAULT ''
+                 port_map        TEXT NOT NULL DEFAULT '',
+                 project_root    TEXT NOT NULL DEFAULT '',
+                 PRIMARY KEY (project_root, handle)
              );
              CREATE TABLE IF NOT EXISTS snapshots (
                  snapshot_id   TEXT PRIMARY KEY,
                  handle        TEXT NOT NULL,
+                 project_root  TEXT NOT NULL DEFAULT '',
                  head_sha      TEXT,
                  snapshot_path TEXT NOT NULL,
                  content_hash  TEXT NOT NULL,
                  saved_at      INTEGER NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_snapshots_handle_sha
-                 ON snapshots(handle, head_sha);",
+             );",
         )?;
         // Pre-release schema additions; harmless when the column exists.
         for stmt in [
@@ -169,9 +172,67 @@ impl Registry {
             "ALTER TABLE machines ADD COLUMN ram_mib INTEGER NOT NULL DEFAULT 4096",
             "ALTER TABLE machines ADD COLUMN port_map TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE machines ADD COLUMN project_root TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE snapshots ADD COLUMN project_root TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(stmt, []);
         }
+        // The index arrives after the column additions above so legacy
+        // registries gain the column first.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_scope_handle_sha
+                 ON snapshots(project_root, handle, head_sha)",
+            [],
+        )?;
+        // Pre-release: registries created before machines were scoped by
+        // repository keyed machines on handle alone. Rebuild once so two
+        // repositories can hold the same handle.
+        let machines_scoped: bool = {
+            let mut stmt = conn.prepare("PRAGMA table_info(machines)")?;
+            let pks: Vec<String> = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?)))?
+                .filter_map(|r| r.ok())
+                .filter(|(_, pk)| *pk > 0)
+                .map(|(name, _)| name)
+                .collect();
+            pks.contains(&"project_root".to_string())
+        };
+        if !machines_scoped {
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE machines RENAME TO machines_legacy;
+                 CREATE TABLE machines (
+                     handle          TEXT NOT NULL,
+                     base_commit     TEXT,
+                     recipe_hash     TEXT NOT NULL,
+                     parent_machine  TEXT,
+                     base_image_path TEXT NOT NULL,
+                     overlay_path    TEXT NOT NULL,
+                     lifecycle       TEXT NOT NULL DEFAULT 'live',
+                     detached        INTEGER NOT NULL DEFAULT 0,
+                     created_at      INTEGER NOT NULL,
+                     cpus            INTEGER NOT NULL DEFAULT 2,
+                     ram_mib         INTEGER NOT NULL DEFAULT 4096,
+                     port_map        TEXT NOT NULL DEFAULT '',
+                     project_root    TEXT NOT NULL DEFAULT '',
+                     PRIMARY KEY (project_root, handle)
+                 );
+                 INSERT INTO machines
+                     SELECT handle, base_commit, recipe_hash, parent_machine,
+                            base_image_path, overlay_path, lifecycle, detached,
+                            created_at, cpus, ram_mib, port_map, project_root
+                     FROM machines_legacy;
+                 DROP TABLE machines_legacy;
+                 COMMIT;",
+            )?;
+        }
+        // Backfill snapshot scope from the owning machine where possible.
+        conn.execute(
+            "UPDATE snapshots SET project_root =
+                 COALESCE((SELECT m.project_root FROM machines m
+                           WHERE m.handle = snapshots.handle), '')
+             WHERE project_root = ''",
+            [],
+        )?;
         Ok(Self { conn })
     }
 
@@ -224,15 +285,17 @@ impl Registry {
         })
     }
 
-    pub fn get_machine(&self, handle: &str) -> Result<Option<Machine>> {
+    /// Look up a machine by handle within one repository scope
+    /// (`project_root`; empty = created outside any repository).
+    pub fn get_machine(&self, project_root: &str, handle: &str) -> Result<Option<Machine>> {
         Ok(self
             .conn
             .query_row(
                 &format!(
-                    "SELECT {} FROM machines WHERE handle = ?1",
+                    "SELECT {} FROM machines WHERE project_root = ?1 AND handle = ?2",
                     Self::MACHINE_COLS
                 ),
-                params![handle],
+                params![project_root, handle],
                 Self::row_to_machine,
             )
             .optional()?)
@@ -247,29 +310,42 @@ impl Registry {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    pub fn remove_machine(&self, handle: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM machines WHERE handle = ?1", params![handle])?;
-        Ok(())
-    }
-
-    pub fn set_lifecycle(&self, handle: &str, lifecycle: &str) -> Result<()> {
+    pub fn remove_machine(&self, project_root: &str, handle: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE machines SET lifecycle = ?2 WHERE handle = ?1",
-            params![handle, lifecycle],
+            "DELETE FROM machines WHERE project_root = ?1 AND handle = ?2",
+            params![project_root, handle],
         )?;
         Ok(())
     }
 
-    /// Latest snapshot for (handle, head_sha), if any.
-    pub fn find_snapshot(&self, handle: &str, head_sha: &str) -> Result<Option<Snapshot>> {
+    pub fn set_lifecycle(&self, project_root: &str, handle: &str, lifecycle: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE machines SET lifecycle = ?3 WHERE project_root = ?1 AND handle = ?2",
+            params![project_root, handle, lifecycle],
+        )?;
+        Ok(())
+    }
+
+    const SNAPSHOT_COLS: &'static str =
+        "snapshot_id, handle, project_root, head_sha, snapshot_path, content_hash, saved_at";
+
+    /// Latest snapshot for (project_root, handle, head_sha), if any.
+    pub fn find_snapshot(
+        &self,
+        project_root: &str,
+        handle: &str,
+        head_sha: &str,
+    ) -> Result<Option<Snapshot>> {
         Ok(self
             .conn
             .query_row(
-                "SELECT snapshot_id, handle, head_sha, snapshot_path, content_hash, saved_at
-                 FROM snapshots WHERE handle = ?1 AND head_sha = ?2
-                 ORDER BY saved_at DESC LIMIT 1",
-                params![handle, head_sha],
+                &format!(
+                    "SELECT {} FROM snapshots
+                     WHERE project_root = ?1 AND handle = ?2 AND head_sha = ?3
+                     ORDER BY saved_at DESC LIMIT 1",
+                    Self::SNAPSHOT_COLS
+                ),
+                params![project_root, handle, head_sha],
                 Self::row_to_snapshot,
             )
             .optional()?)
@@ -279,40 +355,35 @@ impl Registry {
         Ok(self
             .conn
             .query_row(
-                "SELECT snapshot_id, handle, head_sha, snapshot_path, content_hash, saved_at
-                 FROM snapshots WHERE snapshot_id = ?1",
+                &format!(
+                    "SELECT {} FROM snapshots WHERE snapshot_id = ?1",
+                    Self::SNAPSHOT_COLS
+                ),
                 params![snapshot_id],
                 Self::row_to_snapshot,
             )
             .optional()?)
     }
 
-    pub fn list_snapshots(&self, handle: Option<&str>) -> Result<Vec<Snapshot>> {
-        let (sql, param): (&str, Vec<&str>) = match handle {
-            Some(h) => (
-                "SELECT snapshot_id, handle, head_sha, snapshot_path, content_hash, saved_at
-                 FROM snapshots WHERE handle = ?1 ORDER BY saved_at",
-                vec![h],
-            ),
-            None => (
-                "SELECT snapshot_id, handle, head_sha, snapshot_path, content_hash, saved_at
-                 FROM snapshots ORDER BY saved_at",
-                vec![],
-            ),
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(param), Self::row_to_snapshot)?;
+    pub fn list_snapshots(&self, project_root: &str, handle: &str) -> Result<Vec<Snapshot>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM snapshots
+             WHERE project_root = ?1 AND handle = ?2 ORDER BY saved_at",
+            Self::SNAPSHOT_COLS
+        ))?;
+        let rows = stmt.query_map(params![project_root, handle], Self::row_to_snapshot)?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn insert_snapshot(&self, s: &Snapshot) -> Result<()> {
         self.conn.execute(
             "INSERT INTO snapshots
-             (snapshot_id, handle, head_sha, snapshot_path, content_hash, saved_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (snapshot_id, handle, project_root, head_sha, snapshot_path, content_hash, saved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 s.snapshot_id,
                 s.handle,
+                s.project_root,
                 s.head_sha,
                 s.snapshot_path,
                 s.content_hash,
@@ -322,10 +393,12 @@ impl Registry {
         Ok(())
     }
 
-    pub fn remove_snapshots(&self, handle: &str) -> Result<Vec<Snapshot>> {
-        let snaps = self.list_snapshots(Some(handle))?;
-        self.conn
-            .execute("DELETE FROM snapshots WHERE handle = ?1", params![handle])?;
+    pub fn remove_snapshots(&self, project_root: &str, handle: &str) -> Result<Vec<Snapshot>> {
+        let snaps = self.list_snapshots(project_root, handle)?;
+        self.conn.execute(
+            "DELETE FROM snapshots WHERE project_root = ?1 AND handle = ?2",
+            params![project_root, handle],
+        )?;
         Ok(snaps)
     }
 
@@ -343,10 +416,11 @@ impl Registry {
         Ok(Snapshot {
             snapshot_id: r.get(0)?,
             handle: r.get(1)?,
-            head_sha: r.get(2)?,
-            snapshot_path: r.get(3)?,
-            content_hash: r.get(4)?,
-            saved_at: r.get(5)?,
+            project_root: r.get(2)?,
+            head_sha: r.get(3)?,
+            snapshot_path: r.get(4)?,
+            content_hash: r.get(5)?,
+            saved_at: r.get(6)?,
         })
     }
 }
@@ -356,6 +430,7 @@ impl Registry {
 /// content hash, returns the existing snapshot.
 pub fn save_snapshot(
     reg: &Registry,
+    project_root: &str,
     handle: &str,
     head_sha: Option<&str>,
     overlay: &Path,
@@ -364,7 +439,7 @@ pub fn save_snapshot(
     let hash = content_hash(overlay)?;
 
     if let Some(sha) = head_sha {
-        if let Some(existing) = reg.find_snapshot(handle, sha)? {
+        if let Some(existing) = reg.find_snapshot(project_root, handle, sha)? {
             if existing.content_hash == hash {
                 return Ok((existing, false));
             }
@@ -380,6 +455,7 @@ pub fn save_snapshot(
     let snapshot = Snapshot {
         snapshot_id: format!("s_{}", &hash[..8]),
         handle: handle.to_string(),
+        project_root: project_root.to_string(),
         head_sha: head_sha.map(str::to_string),
         snapshot_path: snap_path.to_string_lossy().into_owned(),
         content_hash: hash,

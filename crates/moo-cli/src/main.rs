@@ -227,10 +227,18 @@ fn cmd_ls() -> Result<i32> {
         return Ok(0);
     }
     println!(
-        "{:<24} {:<8} {:<14} {:<22} snapshots",
-        "HANDLE", "STATE", "BASE COMMIT", "PORTS (host->guest)"
+        "{:<16} {:<24} {:<8} {:<14} {:<22} snapshots",
+        "REPO", "HANDLE", "STATE", "BASE COMMIT", "PORTS (host->guest)"
     );
     for row in rows {
+        let repo = if row.machine.project_root.is_empty() {
+            "-".to_string()
+        } else {
+            std::path::Path::new(&row.machine.project_root)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| row.machine.project_root.clone())
+        };
         let state = if row.running {
             "running"
         } else {
@@ -253,7 +261,8 @@ fn cmd_ls() -> Result<i32> {
                 .join(" ")
         };
         println!(
-            "{:<24} {:<8} {:<14} {:<22} {}",
+            "{:<16} {:<24} {:<8} {:<14} {:<22} {}",
+            repo,
             row.machine.handle,
             state,
             base,
@@ -297,7 +306,7 @@ fn cmd_open(args: &[String]) -> Result<i32> {
     let url = format!("http://localhost:{}{}", host_port, path.unwrap_or("/"));
     println!("{url}");
 
-    if !moo_core::shim::is_running(name) {
+    if !moo_core::machine_is_running(name) {
         eprintln!(
             "note: machine '{name}' is not running — nothing answers yet; `moo run {name} -- true` boots it"
         );
@@ -383,9 +392,9 @@ fn cmd_doctor() -> Result<i32> {
 }
 
 fn cmd_shim(args: &[String]) -> Result<i32> {
-    let [handle] = args else {
+    let [handle, project_root] = args else {
         bail!("internal: bad supervisor invocation");
     };
-    moo_core::shim::run(handle)?;
+    moo_core::shim::run(project_root, handle)?;
     Ok(0)
 }
