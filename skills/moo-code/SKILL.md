@@ -27,8 +27,20 @@ moo doctor >/dev/null 2>&1 || curl -fsSL https://github.com/heyito/moo/releases/
 
 ## Starting an issue
 
-1. Create the branch as usual (`git checkout -b feat/x` or
-   `git worktree add ../repo-feat-x -b feat/x`).
+1. Give the work its own files. **A machine isolates the runtime, not
+   the working tree** — the host tree syncs in and is authoritative, so
+   two sessions editing one checkout will overwrite each other no matter
+   how many machines they have.
+   - Working alone in this checkout: `git checkout -b feat/x` is fine.
+   - **Any parallel work** (another agent session, another human, or any
+     doubt): each session takes its own worktree, and works from inside
+     it:
+
+```bash
+git worktree add ../$(basename $PWD)-feat-x -b feat/x
+cd ../$(basename $PWD)-feat-x
+```
+
 2. Create its machine, named after the branch, forked from the provisioned
    baseline if one exists (`moo ls` shows a `base` handle):
 
@@ -81,13 +93,24 @@ moo new feat/x            # boots the snapshot saved for that commit,
 
 ## Parallel attempts and promotion
 
+Machines isolate runtime; **worktrees isolate files**. Every parallel
+attempt needs both — one worktree + one machine per attempt:
+
 ```bash
+git worktree add ../repo-attempt-1 -b attempt-1
+cd ../repo-attempt-1
 moo new attempt-1 from feat/x     # sub-second CoW fork, fully isolated
 moo run attempt-1 -- <agent work>
 moo save attempt-1
-git merge <winning branch>        # promote via git
+git merge <winning branch>        # promote via git (from the main checkout)
 moo drop attempt-1                # losers vanish; snapshots survive
+git worktree remove ../repo-attempt-1
 ```
+
+Never run two agent sessions against the same checkout: they will
+overwrite each other's edits and stash each other's work, and each
+branch switch rewrites the files synced into the other session's
+machine.
 
 Machines never collide: each has its own filesystem, DB, processes, and
 its own stable host port per declared guest port (see `moo ls`).

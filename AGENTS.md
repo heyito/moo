@@ -56,9 +56,13 @@ machine's name (sub-second copy-on-write fork).
 - Services started inside a machine keep running between `moo run` calls;
   start them with `nohup … &`. To be reachable from the host they must
   listen on `0.0.0.0`; find the host port with `moo ls` or `moo open`.
-- Parallel attempts: `moo new attempt-1 from <base>` forks a fully
-  isolated machine per attempt; promote the winner with `git merge`,
-  then `moo drop` the losers.
+- Parallel attempts: machines isolate the runtime, **not the files** —
+  the host working tree syncs in and is authoritative. Every parallel
+  session needs its own `git worktree` (work from inside it) plus its
+  own machine: `git worktree add ../repo-attempt-1 -b attempt-1`, then
+  `moo new attempt-1 from <base>`. Promote the winner with `git merge`,
+  then `moo drop` the losers. Never run two sessions against the same
+  checkout.
 
 Full workflow skill (installable in Claude Code / Cursor):
 [skills/moo-code/SKILL.md](skills/moo-code/SKILL.md). Human-oriented
