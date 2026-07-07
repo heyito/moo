@@ -265,9 +265,11 @@ $ for name in a b c; do
 - **Machines belong to their repository.** Handles are scoped to the
   repository a machine was created from: `moo new base` in two different
   repositories creates two independent machines, and every verb resolves
-  names against the repository you run it in. `moo ls` lists all
-  machines on the host with their repository. Golden images are still
-  shared across repositories by recipe content.
+  names against the repository you run it in. All worktrees of a
+  repository share its machines — `moo new feat/x from base` works from
+  a fresh worktree — and each worktree syncs its own files. `moo ls`
+  lists all machines on the host with their repository. Golden images
+  are still shared across repositories by recipe content.
 - **Durability.** A live machine's disk survives machine shutdown, not
   host power loss. Snapshots are flushed to physical disk and survive
   power loss.

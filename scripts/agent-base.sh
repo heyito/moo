@@ -46,20 +46,44 @@ say "Node.js (current LTS via NodeSource)"
     && (corepack enable 2>/dev/null || true) \
     && echo "node $(node --version), npm $(npm --version)"'
 
-say "Chromium (headless-capable, desktop-ready)"
-# Everything in the guest runs as root, and Chromium refuses to start as
-# root with its sandbox on. The machine itself is the sandbox here, so
-# disable Chromium's via the wrapper config Debian provides.
+say "Chromium via Playwright (headless-capable, desktop-ready)"
+# Debian's apt `chromium` crashes under the guest kernel in real use
+# (dbus/crashpad/seccomp) even when a trivial headless probe passes, so
+# the toolkit ships Playwright's Chromium build instead. Everything in
+# the guest runs as root and the machine itself is the sandbox, so the
+# wrapper disables Chromium's own.
 "$MOO" run "$NAME" -- 'DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-    chromium chromium-driver fonts-noto-color-emoji fonts-dejavu-core \
-    >/dev/null \
-    && mkdir -p /etc/chromium.d \
-    && printf "export CHROMIUM_FLAGS=\"\$CHROMIUM_FLAGS --no-sandbox --disable-dev-shm-usage --disable-gpu\"\n" \
-        > /etc/chromium.d/moo-guest \
-    && chromium --version'
+    fonts-noto-color-emoji fonts-dejavu-core fonts-liberation >/dev/null \
+    && npx -y playwright@latest install --with-deps chromium >/dev/null 2>&1 \
+    && echo "playwright chromium installed"'
 
-say "Verifying headless Chromium"
-"$MOO" run "$NAME" -- 'chromium --headless --disable-dev-shm-usage --dump-dom about:blank >/dev/null 2>&1 && echo "headless chromium works"'
+"$MOO" run "$NAME" -- 'cat > /usr/local/bin/chromium <<"EOF"
+#!/bin/sh
+# Playwright-managed Chromium with root-safe flags. The newest installed
+# build wins; projects that install their own playwright browsers land in
+# the same place and are picked up automatically.
+bin=$(ls -t /root/.cache/ms-playwright/chromium-*/chrome-linux*/chrome 2>/dev/null | head -1)
+[ -n "$bin" ] || { echo "chromium: no playwright build found — run: npx playwright install chromium" >&2; exit 127; }
+exec "$bin" --no-sandbox --disable-dev-shm-usage --disable-gpu "$@"
+EOF
+chmod +x /usr/local/bin/chromium
+ln -sf /usr/local/bin/chromium /usr/local/bin/chromium-browser
+mkdir -p /usr/share/applications
+cat > /usr/share/applications/chromium.desktop <<"EOF"
+[Desktop Entry]
+Type=Application
+Name=Chromium
+Comment=Playwright-managed Chromium (root-safe flags)
+Exec=/usr/local/bin/chromium %U
+Terminal=false
+Categories=Network;WebBrowser;
+EOF
+echo "chromium wrapper + desktop launcher installed"'
+
+say "Verifying the browser actually renders"
+# An about:blank probe passes even on broken builds; render a real page
+# and check the DOM comes back.
+"$MOO" run "$NAME" -- 'chromium --headless=new --dump-dom "data:text/html,<h1>moo-browser-ok</h1>" 2>/dev/null | grep -q moo-browser-ok && echo "browser renders (headless)"'
 
 say "Saving the baseline snapshot"
 "$MOO" save "$NAME"

@@ -37,7 +37,10 @@ say "Every agent answers on its own stable host port"
 sleep 1
 pass=true
 for m in "${AGENTS[@]}"; do
-    port=$("$MOO" ls | awk -v m="$m" '$1 == m { split($4, p, "->"); print p[1] }')
+    # `moo open` resolves this repo's machine to its host URL; with stdout
+    # captured it prints without launching a browser.
+    url=$("$MOO" open "$m" 8080)
+    port=${url%/}; port=${port##*:}
     body=$(curl -s --max-time 5 "http://127.0.0.1:${port}/")
     echo "  $m  localhost:$port  ->  \"$body\""
     [ "$body" = "$m" ] || pass=false

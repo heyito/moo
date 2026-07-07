@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The current repository scope: machines belong to the repository they
-/// were created from. Empty string = created outside any repository.
+/// were created from, and all worktrees of a repository share its
+/// machines. Empty string = created outside any repository.
 pub fn scope() -> String {
-    git::toplevel()
+    git::main_root()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
 }

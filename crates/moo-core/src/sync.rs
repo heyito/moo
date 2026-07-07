@@ -126,7 +126,9 @@ pub struct SyncOutcome {
 }
 
 /// Sync the caller's working tree into `machine` if it was created from the
-/// repository the caller is inside. Returns:
+/// repository the caller is inside (any worktree of it). The files come
+/// from the caller's own checkout, so each worktree syncs its own tree.
+/// Returns:
 /// - `Ok(None)` — nothing to do (different/no repo, or tree unchanged),
 /// - `Ok(Some(_))` — synced,
 /// - `Err(_)` — the machine was supposed to receive the tree and didn't.
@@ -134,12 +136,12 @@ pub fn sync_into(machine: &Machine) -> Result<Option<SyncOutcome>> {
     if machine.project_root.is_empty() {
         return Ok(None);
     }
+    if crate::scope() != machine.project_root {
+        return Ok(None);
+    }
     let Some(root) = git::toplevel() else {
         return Ok(None);
     };
-    if root != Path::new(&machine.project_root) {
-        return Ok(None);
-    }
 
     let files = worktree_files(&root)?;
     let print = fingerprint(&root, &files);

@@ -24,15 +24,18 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 say "Machine: $NAME"
 "$MOO" new "$NAME"
 
-port=$("$MOO" ls | awk -v m="$NAME" -v g="->$GUEST_PORT" \
-    '$1 == m { for (i = 1; i <= NF; i++) if ($i ~ g"$") { split($i, p, "->"); print p[1] } }')
-[ -n "$port" ] || die "machine '$NAME' does not forward guest port $GUEST_PORT.
+# `moo open` resolves the host port for this repo's machine and prints the
+# URL; with stdout captured it never launches a browser.
+url=$("$MOO" open "$NAME" "$GUEST_PORT" 2>/dev/null) || die "machine '$NAME' does not forward guest port $GUEST_PORT.
 Declare it in moo.toml and recreate the machine:
 
     [network]
     ports = [$GUEST_PORT]
 
     \$ moo drop $NAME && moo new $NAME"
+url=${url%%$'\n'*}
+port=${url%/}; port=${port##*:}
+[ -n "$port" ] || die "could not resolve the host port for guest port $GUEST_PORT"
 
 if ! "$MOO" run "$NAME" -- \
     'command -v websockify >/dev/null && command -v Xtigervnc >/dev/null && command -v startxfce4 >/dev/null' \

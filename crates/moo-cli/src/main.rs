@@ -312,8 +312,11 @@ fn cmd_open(args: &[String]) -> Result<i32> {
         );
         return Ok(0);
     }
-    // Best-effort browser launch; the printed URL is the contract.
-    let _ = std::process::Command::new("open").arg(&url).status();
+    // Best-effort browser launch; the printed URL is the contract. Scripts
+    // capture stdout to resolve ports — don't pop a browser at them.
+    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        let _ = std::process::Command::new("open").arg(&url).status();
+    }
     Ok(0)
 }
 
