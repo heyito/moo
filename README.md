@@ -79,6 +79,38 @@ Same result: deps via Homebrew, then a local build is signed, installed,
 and checked with `moo doctor`. Both installers are non-interactive and
 safe to run from a coding agent; see [AGENTS.md](AGENTS.md).
 
+## Onboard a project
+
+Two steps, once per repository.
+
+**1. Install the agent skills.** Four skills teach a coding agent the
+full workflow — machine-per-branch coding, golden-image setup, browser
+desktops, and verifying changes. From the repository root:
+
+```bash
+mkdir -p .claude/skills && curl -fsSL https://github.com/heyito/moo/archive/main.tar.gz \
+    | tar -xz -C .claude/skills --strip-components=2 '*/skills'
+```
+
+That is the Claude Code project location; for Cursor use `.cursor/skills`
+as the destination, or the home-directory equivalents (`~/.claude/skills`,
+`~/.cursor/skills`) to install them once for every project.
+
+**2. Build the golden image and baseline machine.** Ask your agent to
+"set up moo for this project" — the `moo-golden-image` skill walks it
+through everything below — or do it by hand:
+
+```bash
+moo new base                     # first use builds the project's golden image
+curl -fsSL https://github.com/heyito/moo/releases/latest/download/agent-base.sh \
+    | bash -s -- base            # optional: compilers, Node.js, Chromium
+moo run base -- '<install your runtime: packages, database, services>'
+moo save base                    # the baseline everyone forks
+```
+
+From here every branch, worktree, or agent attempt starts fully
+provisioned in under a second: `moo new feat/x from base`.
+
 ## The four verbs
 
 ```
