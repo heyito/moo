@@ -19,6 +19,12 @@ moo open <name> [guest-port] [/path]       print + open the host URL for a
                                            forwarded guest port in the browser
 ```
 
+Prerequisite — `moo` installed and healthy (installs it if missing):
+
+```bash
+moo doctor >/dev/null 2>&1 || curl -fsSL https://github.com/heyito/moo/releases/latest/download/install.sh | sh
+```
+
 ## Starting an issue
 
 1. Create the branch as usual (`git checkout -b feat/x` or

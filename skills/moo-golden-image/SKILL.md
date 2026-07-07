@@ -12,8 +12,12 @@ everyone forks from.
 
 ## Prerequisites
 
-Run `moo doctor`. All checks must pass. If `moo` is not installed, run
-`scripts/install.sh` from the moo repository.
+`moo doctor` must pass (exit 0). If `moo` is missing or unhealthy,
+install it non-interactively and re-check:
+
+```bash
+moo doctor >/dev/null 2>&1 || curl -fsSL https://github.com/heyito/moo/releases/latest/download/install.sh | sh
+```
 
 ## Step 1: Write `moo.toml` at the repo root
 

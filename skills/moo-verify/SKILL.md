@@ -22,6 +22,12 @@ Two absolutes:
   would show is not evidence; only output from commands actually run
   counts. If no command was run, the claim is unverified — say so.
 
+Prerequisite — `moo` installed and healthy (installs it if missing):
+
+```bash
+moo doctor >/dev/null 2>&1 || curl -fsSL https://github.com/heyito/moo/releases/latest/download/install.sh | sh
+```
+
 ## The evidence hierarchy — match the artifact to the change
 
 Produce the artifact whose *form* matches what changed. A human verifying

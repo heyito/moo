@@ -11,6 +11,12 @@ surface — and end with `moo save`, so the result is part of the
 machine's versioned state: it survives `moo drop` + `moo new`, and
 forks of the machine carry their own copy.
 
+## Prerequisite: moo installed and healthy
+
+```bash
+moo doctor >/dev/null 2>&1 || curl -fsSL https://github.com/heyito/moo/releases/latest/download/install.sh | sh
+```
+
 ## Prerequisite: forward the desktop port
 
 The project's `moo.toml` must forward guest port 6901:
