@@ -41,6 +41,11 @@ machine's name (sub-second copy-on-write fork).
 
 ## Rules
 
+- **Start each unit of work in its own `git worktree`** and work from
+  inside it (`git worktree add ../repo-feat-x -b feat/x`). Machines
+  isolate the runtime, not the files: the host working tree syncs in
+  and is authoritative, so sessions sharing a checkout overwrite each
+  other. Branch in place only when certainly the checkout's sole user.
 - Run everything runtime-related (migrations, seeds, servers, tests,
   package installs) inside the machine via `moo run`. Edit code on the
   host; the working tree auto-syncs into the machine at `/srv/app` (or

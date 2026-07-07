@@ -27,19 +27,20 @@ moo doctor >/dev/null 2>&1 || curl -fsSL https://github.com/heyito/moo/releases/
 
 ## Starting an issue
 
-1. Give the work its own files. **A machine isolates the runtime, not
-   the working tree** — the host tree syncs in and is authoritative, so
-   two sessions editing one checkout will overwrite each other no matter
-   how many machines they have.
-   - Working alone in this checkout: `git checkout -b feat/x` is fine.
-   - **Any parallel work** (another agent session, another human, or any
-     doubt): each session takes its own worktree, and works from inside
-     it:
+1. Give the work its own files — **default to a worktree**. A machine
+   isolates the runtime, not the working tree: the host tree syncs in
+   and is authoritative, so two sessions editing one checkout overwrite
+   each other no matter how many machines they have. A worktree costs
+   nothing and makes the session parallel-safe from the start:
 
 ```bash
 git worktree add ../$(basename $PWD)-feat-x -b feat/x
 cd ../$(basename $PWD)-feat-x
 ```
+
+   Branching in place (`git checkout -b feat/x`) is acceptable only when
+   this session is certainly the sole user of the checkout — when in
+   doubt, take the worktree.
 
 2. Create its machine, named after the branch, forked from the provisioned
    baseline if one exists (`moo ls` shows a `base` handle):

@@ -242,15 +242,23 @@ $ git bisect start bad-sha good-sha
 $ git bisect run bash -c 'moo new probe && moo run probe -- npm test'
 ```
 
-- **Parallel agents, zero collisions.** Every attempt gets its own DB,
-  ports, packages, and services:
+- **Parallel agents, zero collisions.** Machines isolate the runtime;
+  `git worktree` isolates the files. Every parallel attempt gets one of
+  each — its own checkout *and* its own DB, ports, packages, services:
 
 ```
-$ for name in a b c; do moo new agent-$name from HEAD; done
+$ for name in a b c; do
+    git worktree add ../app-agent-$name -b agent/$name
+    (cd ../app-agent-$name && moo new agent-$name from base)
+  done
 ```
+
+  Never point two sessions at the same checkout — the working tree is
+  host-owned and authoritative, so they would overwrite each other's
+  files no matter how many machines they have.
 
 - **Fork-and-promote.** Fork a machine, let an agent work, `git merge` the
-  winner, `moo drop` the losers.
+  winner, `moo drop` the losers and remove their worktrees.
 
 ## Contracts and limitations
 
