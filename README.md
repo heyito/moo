@@ -2,6 +2,8 @@
 
 > **Git versions files. `moo` versions the machine.**
 
+![moo — every commit gets a snapshot of the whole runtime; check out old code and the machine follows](assets/moo-explainer.png)
+
 `moo` gives every git branch, worktree, or agent attempt its own
 hardware-isolated Linux machine — database, ports, packages, services and
 all — with the machine's state **saved per commit and restored by
