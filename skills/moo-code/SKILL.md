@@ -66,6 +66,36 @@ propagate on the next `run`; guest edits to synced files last only until
 the host tree next changes. Machines only sync when the command is run
 from inside the repository they were created from.
 
+## Optional agent toolkit
+
+`moo new` alone does not install the agent toolkit. A provisioned baseline
+may already include it; check the tools needed for the task inside the
+machine before installing anything. When development or browser testing
+needs missing tools, `scripts/agent-base.sh` can provision compilers,
+developer CLIs, database clients, Python, Node.js, and Playwright's
+Chromium with its system dependencies and a root-safe `chromium` launcher.
+The script uses `apt-get` and is intended for Debian/Ubuntu guests.
+
+Run the provisioner **on the host, from inside the project worktree**;
+it installs packages inside the named machine through `moo run`:
+
+```bash
+moo save feat/x                  # preserve live state before the script's moo new
+scripts/agent-base.sh feat/x     # when working in the moo source checkout
+```
+
+For projects without the script, use the release asset instead:
+
+```bash
+curl -fsSL https://github.com/heyito/moo/releases/latest/download/agent-base.sh | bash -s -- feat/x
+```
+
+Save first in either case: the script calls `moo new`, verifies Chromium
+renders, and ends with `moo save`. Future forks inherit the toolkit.
+Headless browser use needs no desktop or VNC setup. The toolkit does not
+add `playwright` or `@playwright/test` to the project; install the project's
+own dependencies and any browser versions they require inside the machine.
+
 ## The one rule: save at commit boundaries
 
 `moo save` is `git commit` for the runtime. After each meaningful commit:
