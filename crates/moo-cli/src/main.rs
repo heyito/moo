@@ -26,6 +26,7 @@ fn dispatch(args: &[String]) -> Result<i32> {
         Some("run") => cmd_run(&args[1..]),
         Some("save") => cmd_save(&args[1..]),
         Some("drop") => cmd_drop(&args[1..]),
+        Some("remove") => cmd_remove(&args[1..]),
         Some("ls") => cmd_ls(),
         Some("open") => cmd_open(&args[1..]),
         Some("doctor") => cmd_doctor(),
@@ -50,6 +51,9 @@ usage:
                                              current commit
   moo drop <name> [--force] [--snapshots]    destroy the machine (saved
                                              snapshots survive by default)
+  moo remove <commit> [<name>]               delete the snapshots saved for a
+                                             commit (all machines, or just
+                                             <name>); also takes a snapshot ID
 
   moo ls                                     list machines and snapshots
   moo open <name> [guest-port] [/path]       open a forwarded port in the
@@ -217,6 +221,24 @@ fn cmd_drop(args: &[String]) -> Result<i32> {
         name,
         if snapshots { " (snapshots too)" } else { "" }
     );
+    Ok(0)
+}
+
+fn cmd_remove(args: &[String]) -> Result<i32> {
+    let (target, name) = match args {
+        [target] => (target, None),
+        [target, name] => (target, Some(name.as_str())),
+        _ => bail!("usage: moo remove <commit> [<name>]"),
+    };
+    for snap in moo_core::remove_snapshots(target, name)? {
+        let sha = snap.head_sha.as_deref().unwrap_or("(no commit)");
+        println!(
+            "removed {} ('{}', commit {})",
+            snap.snapshot_id,
+            snap.handle,
+            &sha[..sha.len().min(12)]
+        );
+    }
     Ok(0)
 }
 

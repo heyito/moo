@@ -404,15 +404,73 @@ pub fn drop_machine(name: &str, force: bool, drop_snapshots: bool) -> Result<()>
 
     if drop_snapshots {
         let removed = reg.remove_snapshots(&root, name)?;
-        for snap in removed {
-            // Content files are shared across handles; only delete when the
-            // last reference is gone.
-            if !reg.snapshot_content_referenced(&snap.content_hash)? {
-                let _ = std::fs::remove_file(&snap.snapshot_path);
-            }
+        delete_unreferenced_content(&reg, &removed)?;
+    }
+    Ok(())
+}
+
+/// Content files are shared across handles; only delete when the last
+/// reference is gone.
+fn delete_unreferenced_content(reg: &Registry, removed: &[Snapshot]) -> Result<()> {
+    for snap in removed {
+        if !reg.snapshot_content_referenced(&snap.content_hash)? {
+            let _ = std::fs::remove_file(&snap.snapshot_path);
         }
     }
     Ok(())
+}
+
+/// `moo remove <commit> [<name>]` — delete this repository's snapshots for
+/// one commit, across all machines or just `handle`. `target` is a git ref,
+/// a SHA prefix of a saved snapshot's commit (works after the commit is
+/// gone from git), or a snapshot ID. Live machines are untouched.
+pub fn remove_snapshots(target: &str, handle: Option<&str>) -> Result<Vec<Snapshot>> {
+    let reg = Registry::open()?;
+    let root = scope();
+
+    let matched = if target.starts_with("s_") {
+        reg.get_snapshot_by_id(target)?
+            .filter(|s| s.project_root == root && handle.is_none_or(|h| s.handle == h))
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        let sha = match git::resolve(target) {
+            Some(sha) => sha,
+            None => {
+                anyhow::ensure!(
+                    target.len() >= 4 && target.chars().all(|c| c.is_ascii_hexdigit()),
+                    "'{target}' is not a commit or snapshot ID"
+                );
+                target.to_ascii_lowercase()
+            }
+        };
+        let found = reg.find_snapshots_by_commit(&root, &sha, handle)?;
+        let mut shas: Vec<_> = found.iter().filter_map(|s| s.head_sha.as_deref()).collect();
+        shas.sort();
+        shas.dedup();
+        if shas.len() > 1 {
+            bail!(
+                "'{target}' is ambiguous: matches commits {}",
+                shas.iter()
+                    .map(|s| &s[..s.len().min(12)])
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        found
+    };
+    if matched.is_empty() {
+        match handle {
+            Some(h) => bail!("no snapshot of '{h}' for '{target}'"),
+            None => bail!("no snapshots for '{target}'"),
+        }
+    }
+
+    for snap in &matched {
+        reg.remove_snapshot(&snap.snapshot_id)?;
+    }
+    delete_unreferenced_content(&reg, &matched)?;
+    Ok(matched)
 }
 
 pub struct LsRow {

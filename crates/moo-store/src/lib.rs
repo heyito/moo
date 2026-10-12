@@ -402,6 +402,37 @@ impl Registry {
         Ok(snaps)
     }
 
+    /// Snapshots in `project_root` whose commit starts with `sha_prefix`
+    /// (a full SHA matches exactly), optionally limited to one handle.
+    pub fn find_snapshots_by_commit(
+        &self,
+        project_root: &str,
+        sha_prefix: &str,
+        handle: Option<&str>,
+    ) -> Result<Vec<Snapshot>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM snapshots
+             WHERE project_root = ?1
+               AND substr(head_sha, 1, length(?2)) = ?2
+               AND (?3 IS NULL OR handle = ?3)
+             ORDER BY saved_at, snapshot_id",
+            Self::SNAPSHOT_COLS
+        ))?;
+        let rows = stmt.query_map(
+            params![project_root, sha_prefix, handle],
+            Self::row_to_snapshot,
+        )?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn remove_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM snapshots WHERE snapshot_id = ?1",
+            params![snapshot_id],
+        )?;
+        Ok(())
+    }
+
     /// True if any other snapshot row still references this content hash.
     pub fn snapshot_content_referenced(&self, content_hash: &str) -> Result<bool> {
         let n: i64 = self.conn.query_row(
@@ -476,4 +507,63 @@ pub fn save_snapshot(
 
 pub fn timestamp() -> i64 {
     now()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(id: &str, root: &str, handle: &str, sha: &str) -> Snapshot {
+        Snapshot {
+            snapshot_id: id.into(),
+            handle: handle.into(),
+            project_root: root.into(),
+            head_sha: Some(sha.into()),
+            snapshot_path: format!("/nonexistent/{id}"),
+            content_hash: id.into(),
+            saved_at: 0,
+        }
+    }
+
+    #[test]
+    fn find_and_remove_snapshots_by_commit() {
+        let home = std::env::temp_dir().join(format!("moo-store-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let reg = Registry::open().unwrap();
+
+        reg.insert_snapshot(&snap("s_a", "/repo", "main", "abcdef01"))
+            .unwrap();
+        reg.insert_snapshot(&snap("s_b", "/repo", "feat", "abcdef01"))
+            .unwrap();
+        reg.insert_snapshot(&snap("s_c", "/repo", "main", "12345678"))
+            .unwrap();
+        reg.insert_snapshot(&snap("s_d", "/other", "main", "abcdef01"))
+            .unwrap();
+
+        let ids = |v: Vec<Snapshot>| v.into_iter().map(|s| s.snapshot_id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(reg.find_snapshots_by_commit("/repo", "abcd", None).unwrap()),
+            ["s_a", "s_b"]
+        );
+        assert_eq!(
+            ids(reg
+                .find_snapshots_by_commit("/repo", "abcdef01", Some("feat"))
+                .unwrap()),
+            ["s_b"]
+        );
+        assert!(reg
+            .find_snapshots_by_commit("/repo", "ffff", None)
+            .unwrap()
+            .is_empty());
+
+        reg.remove_snapshot("s_a").unwrap();
+        assert_eq!(
+            ids(reg.find_snapshots_by_commit("/repo", "abcd", None).unwrap()),
+            ["s_b"]
+        );
+        assert!(reg.get_snapshot_by_id("s_d").unwrap().is_some());
+
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 }

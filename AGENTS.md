@@ -30,6 +30,7 @@ moo new <name> [from <src>] [--detached]   create or restore a machine (idempote
 moo run <name> -- <cmd> [args...]          execute inside (docker-exec semantics)
 moo save [<name>]                          snapshot, tagged with the current commit
 moo drop <name> [--force] [--snapshots]    destroy machine (snapshots survive)
+moo remove <commit> [<name>]               delete snapshots saved for a commit
 
 moo ls                                     machines, host->guest port map, snapshots
 moo open <name> [guest-port] [/path]       print + open host URL for a forwarded port

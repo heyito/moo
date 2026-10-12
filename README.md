@@ -120,6 +120,7 @@ moo new <name> [from <src>] [--detached]   create or restore a machine
 moo run <name> -- <cmd> [args...]          execute inside the machine
 moo save [<name>]                          snapshot state, tagged with the current commit
 moo drop <name> [--force] [--snapshots]    destroy the machine (snapshots survive)
+moo remove <commit> [<name>]               delete the snapshots saved for a commit
 ```
 
 - **`new`** is idempotent, like `git checkout`. If a snapshot exists for the
@@ -142,6 +143,10 @@ moo drop <name> [--force] [--snapshots]    destroy the machine (snapshots surviv
   same content, same snapshot. Byte-identical states share storage.
 - **`drop`** destroys the live machine. Saved snapshots survive unless you
   pass `--snapshots`.
+- **`remove`** deletes the snapshots saved for one commit — for every
+  machine in the repository, or just `<name>`. `<commit>` is any git ref,
+  a SHA prefix (works after a rebase dropped the commit), or a snapshot ID.
+  Live machines are untouched.
 
 Admin, read-only: `moo ls` (machines, ports, snapshots), `moo open <name>
 [guest-port] [/path]` (print and open the host URL for a forwarded guest
